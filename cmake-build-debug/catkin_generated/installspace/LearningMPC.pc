@@ -1,0 +1,8 @@
+prefix=/usr/local
+
+Name: LearningMPC
+Description: Description of LearningMPC
+Version: 0.0.0
+Cflags: -I/usr/local/include
+Libs: -L/usr/local/lib -lLearningMPC
+Requires: roscpp rospy

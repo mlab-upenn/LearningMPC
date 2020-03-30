@@ -1,0 +1,8 @@
+prefix=/home/yuwei/yuwei_ws/src/LearningMPC/cmake-build-debug/devel
+
+Name: LearningMPC
+Description: Description of LearningMPC
+Version: 0.0.0
+Cflags: -I/home/yuwei/yuwei_ws/src/LearningMPC/include
+Libs: -L/home/yuwei/yuwei_ws/src/LearningMPC/cmake-build-debug/devel/lib -lLearningMPC
+Requires: roscpp rospy
