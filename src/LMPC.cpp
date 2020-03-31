@@ -95,7 +95,7 @@ private:
     vector<Sample> curr_trajectory_;
     int iter_;
     int time_;
-    Matrix<double,nx,1> terminal_state_;
+    Matrix<double,nx,1> terminal_state_pred_;
 
     // map info
     nav_msgs::OccupancyGrid map_;
@@ -106,6 +106,7 @@ private:
 
     void getParameters(ros::NodeHandle& nh);
     void init_occupancy_grid();
+    int reset_QPSolution(int iter);
     void odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg);
     void add_point();
     void select_trajectory();
@@ -124,7 +125,7 @@ private:
     Matrix<double,nx,1> select_terminal_candidate();
     void select_convex_safe_set(vector<int>& convex_safe_set_costs, vector<Matrix<double,nx,1>>& convex_safe_set, int iter_start, int iter_end, double s);
    // void select_evolved_convex_safe_set(vector<int>& evolved_convex_safe_set, vector<Matrix<double,nx,1>>& nearest_points, vector<Sample>& trajectory, double current_s);
-
+    int find_nearest_point(vector<Sample>& trajectory, double s);
     void update_cost_to_go();
     Matrix<double,nx,1> get_nonlinear_dynamics(Matrix<double,nx,1>& x, Matrix<double,nu,1>& u,  double t);
 };
@@ -162,6 +163,8 @@ void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     double s_curr_ = track_.findTheta(car_pos_.x(), car_pos_.y(), 0, true);
     if (first_run_){
         s_prev_ = s_curr_;
+        // initialize QPSolution_ from initial Sample Safe Set (using the 2nd iteration)
+        reset_QPSolution(1);
         first_run_ = false;
     }
 
@@ -174,6 +177,7 @@ void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
         sort(curr_trajectory_.begin(), curr_trajectory_.end(), compare_s);
         SS_.push_back(curr_trajectory_);
         curr_trajectory_.clear();
+        reset_QPSolution(iter_-1);
         time_ = 0;
     }
 
@@ -181,12 +185,20 @@ void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     Matrix<double,nx,1> terminal_candidate = select_terminal_candidate();
     /** solve MPC and record current state***/
     solve_MPC(terminal_candidate);
-    add_point();
     applyControl();
+    add_point();
     /*** store info and advance to next time step***/
-    Matrix<double,nx,1> terminal_state_ = QPSolution_.segment<nx>(N*nx);
+    terminal_state_pred_ = QPSolution_.segment<nx>(N*nx);
     s_prev_ = s_curr_;
     time_++;
+}
+
+int LMPC::reset_QPSolution(int iter){
+    QPSolution_ = VectorXd::Zero((N+1)*nx+ N*nu + nx*(N+1) + (2*K_NEAR+1));
+    for (int i=0; i<N+1; i++){
+        QPSolution_.segment<nx>(i*nx) = SS_[iter][i].x;
+        if (i<N) QPSolution_.segment<nu>((N+1)*nx + i*nu) = SS_[iter][i].u;
+    }
 }
 
 Matrix<double,nx,1> LMPC::select_terminal_candidate(){
@@ -194,21 +206,56 @@ Matrix<double,nx,1> LMPC::select_terminal_candidate(){
         return SS_.back()[N].x;
     }
     else{
-        return terminal_state_;
+        return terminal_state_pred_;
     }
 }
 
 void LMPC::add_point(){
-
+    Sample point;
+    point.x = global_to_track(car_pos_.x(), car_pos_.y(), yaw_, s_curr_);
+    point.iter = iter_;
+    point.time = time_;
+    point.u = QPSolution_.segment<nu>((N+1)*nx);
+    curr_trajectory_.push_back(point);
 }
 
 void LMPC::select_convex_safe_set(vector<int>& convex_safe_set_costs, vector<Matrix<double,nx,1>>& convex_safe_set, int iter_start, int iter_end, double s){
+    for (int it = iter_start; it<= iter_end; it++){
+        int nearest_ind = find_nearest_point(SS_[it], s);
+        if (K_NEAR%2 != 0 ) {
+            int start_ind = nearest_ind - (K_NEAR-1)/2;
+            int end_ind = nearest_ind + (K_NEAR-1)/2;
+        }
+        else{
+            int start_ind = nearest_ind - K_NEAR/2 + 1;
+            int end_ind = nearest_ind + K_NEAR/2;
+        }
+        vector<Matrix<double,nx,1>> curr_set;
+
+    }
+}
+
+int LMPC::find_nearest_point(vector<Sample>& trajectory, double s){
+    // binary search to find closest point to a given s
+    int low = 0; int high = trajectory.size()-1;
+    while (low<=high){
+        int mid = (low + high)/2;
+        if (s == trajectory[mid].x(nx-1)) return mid;
+        if (s < trajectory[mid].x(nx-1)) high = mid-1;
+        else low = mid+1;
+    }
+    return abs(trajectory[low].x(nx-1)-s) < (abs(trajectory[high].x(nx-1)-s))? low : high;
 
 }
 
 void LMPC::update_cost_to_go(){
+    curr_trajectory_[curr_trajectory_.size()-1].cost = 0;
+    for (int i=curr_trajectory_.size()-2; i>=0; i--){
+        curr_trajectory_[i].cost = curr_trajectory_[i+1].cost + 1;
+    }
 
 }
+
 Vector3d LMPC::global_to_track(double x, double y, double yaw, double s){
     double x_proj = track_.x_eval(s);
     double y_proj = track_.y_eval(s);
@@ -264,7 +311,6 @@ Matrix<double,nx,1> LMPC::get_nonlinear_dynamics(Matrix<double,nx,1>& x, Matrix<
 
     return xdot;
 }
-
 
 void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1> hd,
                                     Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op, double t){
@@ -342,14 +388,13 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
 
         x_k_ref = QPSolution_.segment<nx>(i*nx);
         u_k_ref = QPSolution_.segment<nu>((N+1)*nx + i*nu);
-
+        double s_ref = x_k_ref(nx-1);
         get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref, s_curr_);
-
         /* form Hessian entries*/
         // cost does not depend on x0, only 1 to N
 
         for (int row = 0; row < nx; row++) {
-             HessianMatrix.insert((N+1)*nx+N*nu +i*nx+row, (N+1)*nx+N*nu +i*nx+row) = q_s;
+            HessianMatrix.insert((N+1)*nx+N*nu +i*nx+row, (N+1)*nx+N*nu +i*nx+row) = q_s;
         }
 
         /* form constraint matrix */
@@ -417,27 +462,51 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
         }
     }
 
+    int numOfConstraintsSoFar = (N+1)*nx + 2*(N+1)*nx + N*nu + (N-1) + (N+1)*nx;
     // lamda's >= 0
-    for (int i=0; i<(2*K_NEAR); i++){
-        constraintMatrix.insert((N+1)*nx + 2*(N+1)*nx + N*nu + (N-1) + (N+1)*nx + i, (N+1)*nx+ N*nu + (N+1)*nx + i) = 1.0;
-        lower((N+1)*nx + 2*(N+1)*nx + N*nu + (N-1) + (N+1)*nx + i) = 0;
-        upper((N+1)*nx + 2*(N+1)*nx + N*nu + (N-1) + (N+1)*nx + i) = OsqpEigen::INFTY;
+    for (int i=0; i<2*K_NEAR; i++){
+        constraintMatrix.insert(numOfConstraintsSoFar + i, (N+1)*nx+ N*nu + (N+1)*nx + i) = 1.0;
+        lower(numOfConstraintsSoFar + i) = 0;
+        upper(numOfConstraintsSoFar + i) = OsqpEigen::INFTY;
     }
+    numOfConstraintsSoFar += 2*K_NEAR;
 
-    // terminal state constraints
+    // terminal state constraints: x_N+1 = linear_combination(lambda's)
+    for (int i=0; i<2*K_NEAR; i++){
+        for (int state_ind=0; state_ind<nx; state_ind++){
+            constraintMatrix.insert(numOfConstraintsSoFar + state_ind, (N+1)*nx+ N*nu + (N+1)*nx + i) = terminal_CSS[i](state_ind);
+        }
+    }
+    for (int state_ind=0; state_ind<nx; state_ind++){
+        constraintMatrix.insert(numOfConstraintsSoFar + state_ind, N*nx + state_ind) = -1;
+    }
+    numOfConstraintsSoFar += nx;
 
     // sum of lamda's = 1;
-
+    for (int i=0; i<2*K_NEAR; i++){
+        constraintMatrix.insert(numOfConstraintsSoFar +1, (N+1)*nx+ N*nu + (N+1)*nx + i) = 1;
+    }
+    lower(numOfConstraintsSoFar + 1) = 1.0;
+    upper(numOfConstraintsSoFar + 1) = 1.0;
+    numOfConstraintsSoFar++;
 
     // gradient
+    for (int i=0; i<2*K_NEAR; i++){
+        gradient((N+1)*nx+ N*nu + (N+1)*nx + i) = terminal_CSS_costs[i];
+    }
 
-    lower.head(nx) = -x0;  //x0
+    //x0 constraint
+    lower.head(nx) = -x0;
     upper.head(nx) = -x0;
+
+    //v0 limit
+    lower((N+1)*nx+ 2*(N+1)*nx + 1) =  max(speed_m_-DECELERATION_MAX*Ts, 0.0);
+    upper((N+1)*nx+ 2*(N+1)*nx + 1) =  min(speed_m_+ACCELERATION_MAX*Ts, SPEED_MAX);
 
     SparseMatrix<double> H_t = HessianMatrix.transpose();
     SparseMatrix<double> sparse_I((N+1)*nx+ N*nu + nx*(N+1)+ (2*K_NEAR+1), (N+1)*nx+ N*nu + nx*(N+1)+ (2*K_NEAR+1));
     sparse_I.setIdentity();
-    HessianMatrix = 0.5*(HessianMatrix + H_t) + 0.000001*sparse_I;
+    HessianMatrix = 0.5*(HessianMatrix + H_t) + 0.0000001*sparse_I;
 
     OsqpEigen::Solver solver;
     solver.settings()->setWarmStart(true);
