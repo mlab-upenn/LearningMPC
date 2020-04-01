@@ -123,7 +123,7 @@ private:
     void applyControl();
 
     Matrix<double,nx,1> select_terminal_candidate();
-    void select_convex_safe_set(vector<int>& convex_safe_set_costs, vector<Matrix<double,nx,1>>& convex_safe_set, int iter_start, int iter_end, double s);
+    void select_convex_safe_set(vector<Sample>& convex_safe_set, int iter_start, int iter_end, double s);
    // void select_evolved_convex_safe_set(vector<int>& evolved_convex_safe_set, vector<Matrix<double,nx,1>>& nearest_points, vector<Sample>& trajectory, double current_s);
     int find_nearest_point(vector<Sample>& trajectory, double s);
     void update_cost_to_go();
@@ -219,19 +219,52 @@ void LMPC::add_point(){
     curr_trajectory_.push_back(point);
 }
 
-void LMPC::select_convex_safe_set(vector<int>& convex_safe_set_costs, vector<Matrix<double,nx,1>>& convex_safe_set, int iter_start, int iter_end, double s){
+void LMPC::select_convex_safe_set(vector<Sample>& convex_safe_set, int iter_start, int iter_end, double s){
     for (int it = iter_start; it<= iter_end; it++){
         int nearest_ind = find_nearest_point(SS_[it], s);
+        int start_ind, end_ind;
+        bool overlap_with_finishing_line = false;
+        int lap_cost = SS_[it][0].cost;
+
         if (K_NEAR%2 != 0 ) {
-            int start_ind = nearest_ind - (K_NEAR-1)/2;
-            int end_ind = nearest_ind + (K_NEAR-1)/2;
+            start_ind = nearest_ind - (K_NEAR-1)/2;
+            end_ind = nearest_ind + (K_NEAR-1)/2;
         }
         else{
-            int start_ind = nearest_ind - K_NEAR/2 + 1;
-            int end_ind = nearest_ind + K_NEAR/2;
+            start_ind = nearest_ind - K_NEAR/2 + 1;
+            end_ind = nearest_ind + K_NEAR/2;
         }
-        vector<Matrix<double,nx,1>> curr_set;
 
+        vector<Sample> curr_set;
+        if (end_ind > SS_[it].size()-1){ // front portion of set crossed finishing line
+            for (int ind=start_ind; ind<SS_[it].size(); ind++){
+                curr_set.push_back(SS_[it][ind]);
+                // modify the cost-to-go for each point before finishing line
+                // to incentivize the car to cross finishing line towards a new lap
+                curr_set[curr_set.size()-1].cost += lap_cost;
+            }
+            for (int ind=0; ind<end_ind-SS_[it].size()+1; ind ++){
+                curr_set.push_back(SS_[it][ind]);
+            }
+            if (curr_set.size()!=K_NEAR) throw;  // for debug
+        }
+        else if (start_ind < 0){  //  set crossed finishing line
+            for (int ind=start_ind+SS_[it].size(); ind<SS_[it].size(); ind++){
+                // modify the cost-to-go, same
+                curr_set.push_back(SS_[it][ind]);
+                curr_set[curr_set.size()-1].cost += lap_cost;
+            }
+            for (int ind=0; ind<end_ind+1; ind ++){
+                curr_set.push_back(SS_[it][ind]);
+            }
+            if (curr_set.size()!=K_NEAR) throw;  // for debug
+        }
+        else {  // no overlapping with finishing line
+            for (int ind=start_ind; ind<=end_ind; ind++){
+                curr_set.push_back(SS_[it][ind]);
+            }
+        }
+        convex_safe_set.insert(convex_safe_set.end(), curr_set.begin(), curr_set.end());
     }
 }
 
@@ -253,7 +286,6 @@ void LMPC::update_cost_to_go(){
     for (int i=curr_trajectory_.size()-2; i>=0; i--){
         curr_trajectory_[i].cost = curr_trajectory_[i+1].cost + 1;
     }
-
 }
 
 Vector3d LMPC::global_to_track(double x, double y, double yaw, double s){
@@ -358,9 +390,8 @@ void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, n
 }
 
 void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
-    vector<int> terminal_CSS_costs;
-    vector<Matrix<double,nx,1>> terminal_CSS;
-    select_convex_safe_set(terminal_CSS_costs, terminal_CSS, iter_-2, iter_-1, terminal_candidate(nx-1));
+    vector<Sample> terminal_CSS;
+    select_convex_safe_set(terminal_CSS, iter_-2, iter_-1, terminal_candidate(nx-1));
 
     /** MPC variables: z = [x0, ..., xN, u0, ..., uN-1, s0, ..., sN, lambda0, ....., lambda(2*K_NEAR)]*
      *  constraints: dynamics, track bounds, input limits, acceleration limit, slack, lambdas, terminal state, sum of lambda's*/
@@ -474,7 +505,7 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     // terminal state constraints: x_N+1 = linear_combination(lambda's)
     for (int i=0; i<2*K_NEAR; i++){
         for (int state_ind=0; state_ind<nx; state_ind++){
-            constraintMatrix.insert(numOfConstraintsSoFar + state_ind, (N+1)*nx+ N*nu + (N+1)*nx + i) = terminal_CSS[i](state_ind);
+            constraintMatrix.insert(numOfConstraintsSoFar + state_ind, (N+1)*nx+ N*nu + (N+1)*nx + i) = terminal_CSS[i].x(state_ind);
         }
     }
     for (int state_ind=0; state_ind<nx; state_ind++){
@@ -492,7 +523,7 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
 
     // gradient
     for (int i=0; i<2*K_NEAR; i++){
-        gradient((N+1)*nx+ N*nu + (N+1)*nx + i) = terminal_CSS_costs[i];
+        gradient((N+1)*nx+ N*nu + (N+1)*nx + i) = terminal_CSS[i].cost;
     }
 
     //x0 constraint
