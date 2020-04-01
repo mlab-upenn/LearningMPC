@@ -42,7 +42,8 @@ using namespace Eigen;
 struct Sample{
     Matrix<double,nx,1> x;
     Matrix<double,nu,1> u;
-    double time;
+    double s;
+    int time;
     int iter;
     int cost;
 };
@@ -103,6 +104,8 @@ private:
 
     VectorXd QPSolution_;
     bool first_run_;
+    vector<geometry_msgs::Point> border_lines_;
+
 
     void getParameters(ros::NodeHandle& nh);
     void init_occupancy_grid();
@@ -114,8 +117,8 @@ private:
 
     void solve_MPC(Matrix<double,nx,1>& terminal_candidate);
 
-    void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1> hd,
-                                 Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op, double t);
+    void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd,
+            Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op);
 
     Vector3d global_to_track(double x, double y, double yaw, double s);
     Vector3d track_to_global(double e_y, double e_yaw, double s);
@@ -124,14 +127,13 @@ private:
 
     Matrix<double,nx,1> select_terminal_candidate();
     void select_convex_safe_set(vector<Sample>& convex_safe_set, int iter_start, int iter_end, double s);
-   // void select_evolved_convex_safe_set(vector<int>& evolved_convex_safe_set, vector<Matrix<double,nx,1>>& nearest_points, vector<Sample>& trajectory, double current_s);
     int find_nearest_point(vector<Sample>& trajectory, double s);
     void update_cost_to_go();
     Matrix<double,nx,1> get_nonlinear_dynamics(Matrix<double,nx,1>& x, Matrix<double,nu,1>& u,  double t);
 };
 
 int compare_s(Sample& s1, Sample& s2){
-    return (s1.x(nx-1)< s2.x(nx-1));
+    return (s1.s< s2.s);
 }
 
 void LMPC::init_occupancy_grid(){
@@ -212,7 +214,8 @@ Matrix<double,nx,1> LMPC::select_terminal_candidate(){
 
 void LMPC::add_point(){
     Sample point;
-    point.x = global_to_track(car_pos_.x(), car_pos_.y(), yaw_, s_curr_);
+    point.x = VectorXd(car_pos_.x(), car_pos_.y(), yaw_);
+    point.s = s_curr_;
     point.iter = iter_;
     point.time = time_;
     point.u = QPSolution_.segment<nu>((N+1)*nx);
@@ -273,11 +276,11 @@ int LMPC::find_nearest_point(vector<Sample>& trajectory, double s){
     int low = 0; int high = trajectory.size()-1;
     while (low<=high){
         int mid = (low + high)/2;
-        if (s == trajectory[mid].x(nx-1)) return mid;
-        if (s < trajectory[mid].x(nx-1)) high = mid-1;
+        if (s == trajectory[mid].s) return mid;
+        if (s < trajectory[mid].s) high = mid-1;
         else low = mid+1;
     }
-    return abs(trajectory[low].x(nx-1)-s) < (abs(trajectory[high].x(nx-1)-s))? low : high;
+    return abs(trajectory[low].s-s) < (abs(trajectory[high].s-s))? low : high;
 
 }
 
@@ -311,87 +314,50 @@ Vector3d LMPC::track_to_global(double e_y, double e_yaw, double s){
     return Vector3d(pos(0), pos(1), yaw);
 }
 
-Matrix<double,nx,1> LMPC::get_nonlinear_dynamics(Matrix<double,nx,1>& x, Matrix<double,nu,1>& u, double t){
-    /* states: e_y, e_yaw, s
-     * inputs: K, v
-     */
-    Matrix<double, nx,1> xdot;
-    double dx_ds = track_.x_eval_d(t);
-    double dy_ds = track_.y_eval_d(t);
-    double d2x_ds2 = track_.x_eval_dd(t);
-    double d2y_ds2 = track_.y_eval_dd(t);
+void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd,
+        Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op){
 
-    double numer = dx_ds*d2y_ds2 - dy_ds*d2x_ds2;
-    double denom = pow(dx_ds,2) + pow(dy_ds, 2);
+    double yaw = x_op(2);
+    double v = u_op(0);
+    double steer = u_op(1);
 
-    double dphi_ds = numer/denom;
+    Vector3d dynamics, h;
+    dynamics(0) = u_op(0)*cos(x_op(2));
+    dynamics(1) = u_op(0)*sin(x_op(2));
+    dynamics(2) = tan(u_op(1))*u_op(0)/CAR_LENGTH;
 
-    //cout << "dphi_ds : "<< dphi_ds<<endl;
-
-    double rho_s = track_.getCenterlineRadius(t);
-    double Ks = track_.getCenterlineCurvature(t);
-
-    xdot(0) = (rho_s - x(0))*tan(x(1))/rho_s;
-    xdot(1) = (rho_s - x(0))*u(0)/(rho_s*cos(x(1))) - dphi_ds;
-    xdot(2) = u(1)*cos(x(1))/(1-Ks*x(0));
-
-    while(xdot(1) > M_PI)  xdot(1) -= 2*M_PI;
-    while(xdot(1) < -M_PI) xdot(1) += 2*M_PI;
-
-    cout<< "xdot: "<<endl;
-    cout<<xdot<<endl;
-
-    return xdot;
-}
-
-void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1> hd,
-                                    Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op, double t){
 
     Matrix<double,nx,nx> A, M12;
     Matrix<double,nx,nu> B;
-    Matrix<double,nx,1> h;
-    double rho_s = track_.getCenterlineRadius(t);
-    double Ks = track_.getCenterlineCurvature(t);
 
-    A <<   0.0,                 (rho_s-x_op(0))/rho_s,      0.0,
-            -u_op(0)/rho_s,                        0.0,      0.0,
-            - Ks*u_op(1)/max(0.01,x_op(2)),                          0.0,      -(1-x_op(0)*Ks)*u_op(1)/max(0.01,x_op(2)*x_op(2));
+    A <<   0.0, 0.0, -v*sin(yaw),
+            0.0, 0.0,  v*cos(yaw),
+            0.0, 0.0,      0.0;
 
-    B <<    0.0, 0.0,
-            (rho_s-x_op(0))/rho_s, 0.0,
-            0.0, (1-x_op(0)*Ks)/max(0.01,x_op(2));
+    B <<   cos(yaw), 0.0,
+            sin(yaw), 0.0,
+            tan(steer)/CAR_LENGTH, v/(cos(steer)*cos(steer)*CAR_LENGTH);
+
+    Matrix<double,nx+nx,nx+nx> aux, M;
+    aux.setZero();
+    aux.block<nx,nx>(0,0) << A;
+    aux.block<nx,nx>(0, nx) << Matrix3d::Identity();
+    M = (aux*Ts).exp();
+    M12 = M.block<nx,nx>(0,nx);
+    h = dynamics - (A*x_op + B*u_op);
 
     //Discretize with Euler approximation
-
-
-    h = get_nonlinear_dynamics(x_op, u_op, t) - (A*x_op + B*u_op);
-
-    Ad = (A*ds).exp();
-    if(A.determinant()>0.01) {
-        Bd = A.inverse()*(Ad - Matrix3d::Identity())*B;
-        hd = A.inverse()*(Ad - Matrix3d::Identity())*h;
-    }
-    else {
-        Matrix<double,nx+nx,nx+nx> aux, M;
-        aux.setZero();
-        aux.block<nx,nx>(0,0) << A;
-        aux.block<nx,nx>(0, nx) << Matrix3d::Identity();
-        M = (aux*ds).exp();
-        M12 = M.block<nx,nx>(0,nx);
-        Bd = M12 * B;
-        hd = M12 * h;
-    }
-    cout<<"Ad: "<<endl;
-    cout<<Ad<<endl;
-    cout<<"Bd: "<<endl;
-    cout<<Bd<<endl;
-//   cout<<"hd: "<<endl;
-    //cout<<hd<<endl;
+    //Ad = Matrix3d::Identity() + A*Ts;
+    Ad = (A*Ts).exp();
+    // Bd = Ts*B;
+    Bd = M12*B;
+    hd = M12*h;
 }
 
 void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     vector<Sample> terminal_CSS;
-    select_convex_safe_set(terminal_CSS, iter_-2, iter_-1, terminal_candidate(nx-1));
+    double s_t = track_.findTheta(terminal_candidate(0), terminal_candidate(1), 0, true);
+    select_convex_safe_set(terminal_CSS, iter_-2, iter_-1, s_t);
 
     /** MPC variables: z = [x0, ..., xN, u0, ..., uN-1, s0, ..., sN, lambda0, ....., lambda(2*K_NEAR)]*
      *  constraints: dynamics, track bounds, input limits, acceleration limit, slack, lambdas, terminal state, sum of lambda's*/
@@ -411,16 +377,16 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     Matrix<double,nx,nx> Ad;
     Matrix<double,nx,nu> Bd;
     Matrix<double,nx,1> x0, hd;
+    border_lines_.clear();
 
-    x0 << global_to_track(car_pos_.x(), car_pos_.y(), yaw_, s_curr_);
+    x0 <<car_pos_.x(), car_pos_.y(), yaw_;
 
     for (int i=0; i<N+1; i++){        //0 to N
-        double Ks = track_.getCenterlineCurvature(s_curr_);
 
         x_k_ref = QPSolution_.segment<nx>(i*nx);
         u_k_ref = QPSolution_.segment<nu>((N+1)*nx + i*nu);
-        double s_ref = x_k_ref(nx-1);
-        get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref, s_curr_);
+        double s_ref = track_.findTheta(x_k_ref(0), x_k_ref(1), 0, true);
+        get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref);
         /* form Hessian entries*/
         // cost does not depend on x0, only 1 to N
 
@@ -450,22 +416,48 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
         for (int row=0; row<nx; row++) {
             constraintMatrix.insert(i*nx+row, i*nx+row) = -1.0;
         }
-        /* track boundary constraints */
-        for (int row=0; row<nx; row++) {
-            //  -inf <= x_k - s_k <= x_max
-            constraintMatrix.insert((N+1)*nx + i*nx+row, i*nx+row) = 1.0;
-            constraintMatrix.insert((N+1)*nx + i*nx+row, (N+1)*nx+ N*nu + i*nx + row) = -1.0;
-        }
-        upper.segment<nx>((N+1)*nx + i*nx) << 0.4, M_PI/4.0, OsqpEigen::INFTY; //track_.getLeftHalfWidth(theta), M_PI/4.0;
-        lower.segment<nx>((N+1)*nx + i*nx) << -OsqpEigen::INFTY, -OsqpEigen::INFTY, -OsqpEigen::INFTY;
 
-        for (int row=0; row<nx; row++) {
-            //  x_min <= x_k + s_k <= inf
-            constraintMatrix.insert((N+1)*nx + (N+1)*nx +i*nx+row, i*nx+row) = 1.0;
-            constraintMatrix.insert((N+1)*nx + (N+1)*nx +i*nx+row, (N+1)*nx+ N*nu + i*nx + row) = 1.0;
-        }
-        upper.segment<nx>((N+1)*nx + (N+1)*nx + i*nx) << OsqpEigen::INFTY, OsqpEigen::INFTY, OsqpEigen::INFTY; //track_.getLeftHalfWidth(theta), M_PI/4.0;
-        lower.segment<nx>((N+1)*nx + (N+1)*nx + i*nx) << -0.4, -M_PI/4.0, 0.0; //-track_.getRightHalfWidth(theta), -M_PI/4.0;
+        double dx_dtheta = track_.x_eval_d(s_ref);
+        double dy_dtheta = track_.y_eval_d(s_ref);
+
+        constraintMatrix.insert((N+1)*nx+ 2*i, i*nx) = -dy_dtheta;      // a*x
+        constraintMatrix.insert((N+1)*nx+ 2*i, i*nx+1) = dx_dtheta;     // b*y
+        constraintMatrix.insert((N+1)*nx+ 2*i, (N+1)*nx +N*nu +i) = 1.0;   // min(C1,C2) <= a*x + b*y + s_k <= inf
+
+        constraintMatrix.insert((N+1)*nx+ 2*i+1, i*nx) = -dy_dtheta;      // a*x
+        constraintMatrix.insert((N+1)*nx+ 2*i+1, i*nx+1) = dx_dtheta;     // b*y
+        constraintMatrix.insert((N+1)*nx+ 2*i+1, (N+1)*nx +N*nu +i) = -1.0;   // -inf <= a*x + b*y - s_k <= max(C1,C2)
+
+        //get upper line and lower line
+        Vector2d left_tangent_p, right_tangent_p, center_p;
+        Vector2d right_line_p1, right_line_p2, left_line_p1, left_line_p2;
+        geometry_msgs::Point r_p1, r_p2, l_p1, l_p2;
+
+        center_p << track_.x_eval(s_ref), track_.y_eval(s_ref);
+        right_tangent_p = center_p + track_.getRightHalfWidth(s_ref) * Vector2d(dy_dtheta, -dx_dtheta).normalized();
+        left_tangent_p  = center_p + track_.getLeftHalfWidth(s_ref) * Vector2d(-dy_dtheta, dx_dtheta).normalized();
+
+        right_line_p1 = right_tangent_p + 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
+        right_line_p2 = right_tangent_p - 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
+        left_line_p1 = left_tangent_p + 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
+        left_line_p2 = left_tangent_p - 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
+
+        r_p1.x = right_line_p1(0);  r_p1.y = right_line_p1(1);
+        r_p2.x = right_line_p2(0);  r_p2.y = right_line_p2(1);
+        l_p1.x = left_line_p1(0);   l_p1.y = left_line_p1(1);
+        l_p2.x = left_line_p2(0);   l_p2.y = left_line_p2(1);
+
+        border_lines_.push_back(r_p1);  border_lines_.push_back(r_p2);
+        border_lines_.push_back(l_p1); border_lines_.push_back(l_p2);
+
+        double C1 =  - dy_dtheta*right_tangent_p(0) + dx_dtheta*right_tangent_p(1);
+        double C2 = - dy_dtheta*left_tangent_p(0) + dx_dtheta*left_tangent_p(1);
+
+        lower((N+1)*nx+ 2*i) = min(C1, C2);
+        upper((N+1)*nx+ 2*i) = OsqpEigen::INFTY;
+
+        lower((N+1)*nx+ 2*i+1) = -OsqpEigen::INFTY;
+        upper((N+1)*nx+ 2*i+1) = max(C1, C2);
 
         // u_min < u < u_max
         if (i<N){
@@ -473,14 +465,14 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
                 constraintMatrix.insert((N+1)*nx+ 2*(N+1)*nx +i*nu+row, (N+1)*nx+i*nu+row) = 1.0;
             }
             // input bounds: speed and steer
-            lower.segment<nu>((N+1)*nx+ 2*(N+1)*nx +i*nu) << -tan(STEER_MAX)/CAR_LENGTH, 0.0;
-            upper.segment<nu>((N+1)*nx+ 2*(N+1)*nx +i*nu) << tan(STEER_MAX)/CAR_LENGTH, SPEED_MAX;
+            lower.segment<nu>((N+1)*nx+ 2*(N+1)*nx +i*nu) <<  0.0, -STEER_MAX;
+            upper.segment<nu>((N+1)*nx+ 2*(N+1)*nx +i*nu) <<SPEED_MAX, STEER_MAX;
         }
 
         if (i<N-1){
             //acceleration
-            constraintMatrix.insert((N+1)*nx+ 2*(N+1)*nx + N*nu +i, (N+1)*nx+ i*nu +1) = -1;
-            constraintMatrix.insert((N+1)*nx+ 2*(N+1)*nx + N*nu +i, (N+1)*nx+ (i+1)*nu +1) = 1;
+            constraintMatrix.insert((N+1)*nx+ 2*(N+1)*nx + N*nu +i, (N+1)*nx+ i*nu) = -1;
+            constraintMatrix.insert((N+1)*nx+ 2*(N+1)*nx + N*nu +i, (N+1)*nx+ (i+1)*nu) = 1;
             lower((N+1)*nx+(N+1)+(N+1)*nu+i) = -DECELERATION_MAX*Ts;
             upper((N+1)*nx+(N+1)+(N+1)*nu+i) = ACCELERATION_MAX*Ts;
         }
@@ -492,8 +484,8 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
             upper((N+1)*nx + 2*(N+1)*nx + N*nu  + (N-1) + i*nx + row) = OsqpEigen::INFTY;
         }
     }
-
     int numOfConstraintsSoFar = (N+1)*nx + 2*(N+1)*nx + N*nu + (N-1) + (N+1)*nx;
+
     // lamda's >= 0
     for (int i=0; i<2*K_NEAR; i++){
         constraintMatrix.insert(numOfConstraintsSoFar + i, (N+1)*nx+ N*nu + (N+1)*nx + i) = 1.0;
@@ -520,6 +512,7 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     lower(numOfConstraintsSoFar + 1) = 1.0;
     upper(numOfConstraintsSoFar + 1) = 1.0;
     numOfConstraintsSoFar++;
+    if (numOfConstraintsSoFar != (N+1)*nx+ 2*(N+1)*nx + N*nu + (N-1) + (N+1)*nx + (2*K_NEAR) +4) throw;  // for debug
 
     // gradient
     for (int i=0; i<2*K_NEAR; i++){
@@ -531,8 +524,8 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     upper.head(nx) = -x0;
 
     //v0 limit
-    lower((N+1)*nx+ 2*(N+1)*nx + 1) =  max(speed_m_-DECELERATION_MAX*Ts, 0.0);
-    upper((N+1)*nx+ 2*(N+1)*nx + 1) =  min(speed_m_+ACCELERATION_MAX*Ts, SPEED_MAX);
+    lower((N+1)*nx+ 2*(N+1)*nx) =  max(speed_m_-DECELERATION_MAX*Ts, 0.0);
+    upper((N+1)*nx+ 2*(N+1)*nx) =  min(speed_m_+ACCELERATION_MAX*Ts, SPEED_MAX);
 
     SparseMatrix<double> H_t = HessianMatrix.transpose();
     SparseMatrix<double> sparse_I((N+1)*nx+ N*nu + nx*(N+1)+ (2*K_NEAR+1), (N+1)*nx+ N*nu + nx*(N+1)+ (2*K_NEAR+1));
@@ -556,18 +549,14 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
         return;
     }
     QPSolution_ = solver.getSolution();
-
     cout<<"Solution: "<<endl;
     cout<<QPSolution_<<endl;
-
     solver.clearSolver();
 }
 
 void LMPC::applyControl() {
-    double u0 = QPSolution_((N+1)*nx);
-    double u1 = QPSolution_((N+1)*nx+1);
-    float steer = atan(u0*CAR_LENGTH);
-    float speed = u1;
+    float speed = QPSolution_((N+1)*nx);
+    float steer = QPSolution_((N+1)*nx+1);
     cout<<"steer_cmd: "<<steer<<endl;
     cout<<"speed_cmd: "<<speed<<endl;
 
