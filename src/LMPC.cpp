@@ -50,12 +50,10 @@ enum rviz_id{
     CENTERLINE,
     CENTERLINE_POINTS,
     CENTERLINE_SPLINE,
-    THETA_EST,
     PREDICTION,
     BORDERLINES,
-    TRAJECTORY_REF,
-    TRAJECTORIES,
-    MAX_THETA,
+    SAFE_SET,
+    TERMINAL_CANDIDATE,
     DEBUG
 };
 
@@ -122,7 +120,7 @@ private:
 
     void getParameters(ros::NodeHandle& nh);
     void init_occupancy_grid();
-    void init_SS_from_data(string data_file);
+    void init_SS_from_data(const string data_file);
     void visualize_centerline();
     int reset_QPSolution(int iter);
     void odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg);
@@ -130,7 +128,7 @@ private:
     void select_trajectory();
     void simulate_dynamics(Matrix<double,nx,1>& state, Matrix<double,nu,1>& input, double dt, Matrix<double,nx,1>& new_state);
 
-    void solve_MPC(Matrix<double,nx,1>& terminal_candidate);
+    void solve_MPC(const Matrix<double,nx,1>& terminal_candidate);
 
     void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd,
             Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op);
@@ -139,7 +137,7 @@ private:
     Vector3d track_to_global(double e_y, double e_yaw, double s);
 
     void applyControl();
-    void visualize_mpc_solution();
+    void visualize_mpc_solution(const vector<Sample>& convex_safe_set, const Matrix<double,nx,1>& terminal_candidate);
 
     Matrix<double,nx,1> select_terminal_candidate();
     void select_convex_safe_set(vector<Sample>& convex_safe_set, int iter_start, int iter_end, double s);
@@ -243,10 +241,12 @@ void LMPC::init_SS_from_data(string data_file) {
         sample.x(2) = std::stof(vec.at(3));
         sample.u(0) = std::stof(vec.at(4));
         sample.u(1) = std::stof(vec.at(5));
+        sample.s = std::stof(vec.at(6));
         sample.iter = it;
         traj.push_back(sample);
         time_prev = sample.time;
     }
+    update_cost_to_go(traj);
     SS_.push_back(traj);
 }
 
@@ -283,7 +283,9 @@ void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     /*** select terminal state candidate and its convex safe set ***/
     Matrix<double,nx,1> terminal_candidate = select_terminal_candidate();
     /** solve MPC and record current state***/
-    solve_MPC(terminal_candidate);
+    for (int i=0; i<5; i++){
+        solve_MPC(terminal_candidate);
+    }
     applyControl();
     add_point();
     /*** store info and advance to next time step***/
@@ -431,6 +433,7 @@ int LMPC::find_nearest_point(vector<Sample>& trajectory, double s){
     }
     return abs(trajectory[low].s-s) < (abs(trajectory[high].s-s))? low : high;
 
+
 }
 
 void LMPC::update_cost_to_go(vector<Sample>& trajectory){
@@ -496,14 +499,20 @@ void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, n
     h = dynamics - (A*x_op + B*u_op);
 
     //Discretize with Euler approximation
-    //Ad = Matrix3d::Identity() + A*Ts;
-    Ad = (A*Ts).exp();
-    // Bd = Ts*B;
-    Bd = M12*B;
-    hd = M12*h;
+    Ad = Matrix3d::Identity() + A*Ts;
+    //Ad = (A*Ts).exp();
+    Bd = Ts*B;
+    hd = Ts*h;
+    //Bd = M12*B;
+    //hd = M12*h;
 }
 
-void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
+void wrap_angle(double& angle, const double angle_ref){
+    while(angle - angle_ref > M_PI) {angle -= 2*M_PI;}
+    while(angle - angle_ref < -M_PI) {angle += 2*M_PI;}
+}
+
+void LMPC::solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
     vector<Sample> terminal_CSS;
     double s_t = track_->findTheta(terminal_candidate(0), terminal_candidate(1), 0, true);
     select_convex_safe_set(terminal_CSS, iter_-2, iter_-1, s_t);
@@ -529,6 +538,16 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     border_lines_.clear();
 
     x0 <<car_pos_.x(), car_pos_.y(), yaw_;
+
+    /** make sure there are no discontinuities in yaw**/
+    // first check terminal safe_set
+    for (int i=0; i<terminal_CSS.size(); i++){
+        wrap_angle(terminal_CSS[i].x(2), x0(2));
+    }
+    // also check for previous QPSolution
+    for (int i=0; i<N+1; i++){
+        wrap_angle(QPSolution_(i*nx+2), x0(2));
+    }
 
     for (int i=0; i<N+1; i++){        //0 to N
 
@@ -701,6 +720,8 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     cout<<"Solution: "<<endl;
     cout<<QPSolution_<<endl;
     solver.clearSolver();
+    visualize_mpc_solution(terminal_CSS, terminal_candidate);
+
 }
 
 void LMPC::applyControl() {
@@ -719,7 +740,7 @@ void LMPC::applyControl() {
     drive_pub_.publish(ack_msg);
 }
 
-void LMPC::visualize_mpc_solution() {
+void LMPC::visualize_mpc_solution(const vector<Sample>& convex_safe_set, const Matrix<double,nx,1>& terminal_candidate) {
     visualization_msgs::MarkerArray markers;
 
     visualization_msgs::Marker pred_dots;
@@ -728,7 +749,7 @@ void LMPC::visualize_mpc_solution() {
     pred_dots.id = rviz_id::PREDICTION;
     pred_dots.ns = "predicted_positions";
     pred_dots.type = visualization_msgs::Marker::POINTS;
-    pred_dots.scale.x = pred_dots.scale.y = pred_dots.scale.z = 0.08;
+    pred_dots.scale.x = pred_dots.scale.y = pred_dots.scale.z = 0.05;
     pred_dots.action = visualization_msgs::Marker::ADD;
     pred_dots.pose.orientation.w = 1.0;
     pred_dots.color.g = 1.0;
@@ -755,6 +776,45 @@ void LMPC::visualize_mpc_solution() {
 
     borderlines.points = border_lines_;
     markers.markers.push_back(borderlines);
+
+    visualization_msgs::Marker css_dots;
+    css_dots.header.stamp = ros::Time::now();
+    css_dots.header.frame_id = "map";
+    css_dots.id = rviz_id::SAFE_SET;
+    css_dots.ns = "safe_set";
+    css_dots.type = visualization_msgs::Marker::POINTS;
+    css_dots.scale.x = css_dots.scale.y = css_dots.scale.z = 0.04;
+    css_dots.action = visualization_msgs::Marker::ADD;
+    css_dots.pose.orientation.w = 1.0;
+    css_dots.color.g = 1.0;
+    css_dots.color.b = 1.0;
+    css_dots.color.a = 1.0;
+    VectorXd costs = VectorXd(convex_safe_set.size());
+    for (int i=0; i<convex_safe_set.size(); i++){
+        geometry_msgs::Point p;
+        p.x = convex_safe_set[i].x(0);
+        p.y = convex_safe_set[i].x(1);
+        css_dots.points.push_back(p);
+        costs(i) = convex_safe_set[i].cost;
+    }
+    cout<<"costs: "<<costs<< endl;
+    markers.markers.push_back(css_dots);
+
+    visualization_msgs::Marker terminal_dot;
+    terminal_dot.header.stamp = ros::Time::now();
+    terminal_dot.header.frame_id = "map";
+    terminal_dot.id = rviz_id::TERMINAL_CANDIDATE;
+    terminal_dot.ns = "terminal_candidate";
+    terminal_dot.type = visualization_msgs::Marker::SPHERE;
+    terminal_dot.scale.x = terminal_dot.scale.y = terminal_dot.scale.z = 0.1;
+    terminal_dot.action = visualization_msgs::Marker::ADD;
+    terminal_dot.pose.orientation.w = 1.0;
+    terminal_dot.pose.position.x = terminal_candidate(0);
+    terminal_dot.pose.position.y = terminal_candidate(1);
+    terminal_dot.color.r = 0.5;
+    terminal_dot.color.b = 0.8;
+    terminal_dot.color.a = 1.0;
+    markers.markers.push_back(terminal_dot);
 
     LMPC_viz_pub_.publish(markers);
 }

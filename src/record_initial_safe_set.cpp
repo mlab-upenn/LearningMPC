@@ -92,6 +92,7 @@ void Record_SS::cmd_callback(const ackermann_msgs::AckermannDriveStampedConstPtr
             lap_++;
             if (lap_>1){ //initial two laps completed
                 data_file_.close();
+                delete(track_);
                 ros::shutdown();
             }
         }
