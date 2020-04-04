@@ -2,10 +2,6 @@
 // Created by yuwei on 11/11/19.
 //
 
-#ifndef SRC_CSVREADER_H
-#define SRC_CSVREADER_H
-
-#endif //SRC_CSVREADER_H
 
 #include <iostream>
 #include <fstream>

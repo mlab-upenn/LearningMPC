@@ -29,7 +29,6 @@
 #include <LearningMPC/track.h>
 #include <Eigen/Sparse>
 #include "OsqpEigen/OsqpEigen.h"
-#include <LearningMPC/occupancy_grid.h>
 #include <unsupported/Eigen/MatrixFunctions>
 
 const int nx = 3;
@@ -46,6 +45,18 @@ struct Sample{
     int time;
     int iter;
     int cost;
+};
+enum rviz_id{
+    CENTERLINE,
+    CENTERLINE_POINTS,
+    CENTERLINE_SPLINE,
+    THETA_EST,
+    PREDICTION,
+    BORDERLINES,
+    TRAJECTORY_REF,
+    TRAJECTORIES,
+    MAX_THETA,
+    DEBUG
 };
 
 class LMPC{
@@ -67,6 +78,8 @@ private:
     /*Paramaters*/
     string pose_topic;
     string drive_topic;
+    string wp_file_name;
+    double WAYPOINT_SPACE;
     double Ts;
     double ds;
     int speed_num;
@@ -82,7 +95,7 @@ private:
     // MPC params
     double q_s;
 
-    Track track_;
+    Track* track_;
     //odometry
     tf::Transform tf_;
     tf::Vector3 car_pos_;
@@ -109,6 +122,8 @@ private:
 
     void getParameters(ros::NodeHandle& nh);
     void init_occupancy_grid();
+    void init_SS_from_data(string data_file);
+    void visualize_centerline();
     int reset_QPSolution(int iter);
     void odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg);
     void add_point();
@@ -124,13 +139,68 @@ private:
     Vector3d track_to_global(double e_y, double e_yaw, double s);
 
     void applyControl();
+    void visualize_mpc_solution();
 
     Matrix<double,nx,1> select_terminal_candidate();
     void select_convex_safe_set(vector<Sample>& convex_safe_set, int iter_start, int iter_end, double s);
     int find_nearest_point(vector<Sample>& trajectory, double s);
-    void update_cost_to_go();
+    void update_cost_to_go(vector<Sample>& trajectory);
     Matrix<double,nx,1> get_nonlinear_dynamics(Matrix<double,nx,1>& x, Matrix<double,nu,1>& u,  double t);
 };
+
+LMPC::LMPC(ros::NodeHandle &nh): nh_(nh){
+
+    getParameters(nh_);
+    init_occupancy_grid();
+    track_ = new Track(wp_file_name, WAYPOINT_SPACE, map_, true);
+
+    odom_sub_ = nh_.subscribe(pose_topic, 10, &LMPC::odom_callback, this);
+    drive_pub_ = nh_.advertise<ackermann_msgs::AckermannDriveStamped>(drive_topic, 1);
+   // rrt_sub_ = nh_.subscribe("path_found", 1, &LMPC::rrt_path_callback, this);
+  //  map_sub_ = nh_.subscribe("map_updated", 1, &LMPC::map_callback, this);
+
+    track_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("track_centerline", 1);
+
+    LMPC_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("LMPC", 1);
+    debugger_pub_ = nh_.advertise<visualization_msgs::Marker>("Debugger", 1);
+
+    nav_msgs::Odometry odom_msg;
+    boost::shared_ptr<nav_msgs::Odometry const> odom_ptr;
+    odom_ptr = ros::topic::waitForMessage<nav_msgs::Odometry>("odom", ros::Duration(5));
+    if (odom_ptr == nullptr){cout<< "fail to receive odom message!"<<endl;}
+    else{
+        odom_msg = *odom_ptr;
+    }
+    float x = odom_msg.pose.pose.position.x;
+    float y = odom_msg.pose.pose.position.y;
+    s_prev_ = track_->findTheta(x, y,0,true);
+    car_pos_ = tf::Vector3(x, y, 0.0);
+    yaw_ = tf::getYaw(odom_msg.pose.pose.orientation);
+
+    iter_ = 2;
+
+    init_SS_from_data("/home/yuwei/yuwei_ws/src/LearningMPC/initial_safe_set.csv");
+    cout<<"SS size: "<<SS_.size()<<endl;
+}
+
+void LMPC::getParameters(ros::NodeHandle &nh) {
+    nh.getParam("pose_topic", pose_topic);
+    nh.getParam("drive_topic", drive_topic);
+    nh.getParam("wp_file_name", wp_file_name);
+    nh.getParam("N",N);
+    nh.getParam("Ts",Ts);
+    nh.getParam("K_NEAR", K_NEAR);
+    nh.getParam("ACCELERATION_MAX", ACCELERATION_MAX);
+    nh.getParam("DECELERATION_MAX", DECELERATION_MAX);
+    nh.getParam("SPEED_MAX", SPEED_MAX);
+    nh.getParam("STEER_MAX", STEER_MAX);
+    nh.getParam("WAYPOINT_SPACE", WAYPOINT_SPACE);
+//    nh.getParam("r_v",r_v);
+//    nh.getParam("r_steer",r_steer);
+    nh.getParam("q_s",q_s);
+ //   R.diagonal() << r_v, r_steer;
+    nh.getParam("MAP_MARGIN",MAP_MARGIN);
+}
 
 int compare_s(Sample& s1, Sample& s2){
     return (s1.s< s2.s);
@@ -149,22 +219,49 @@ void LMPC::init_occupancy_grid(){
     occupancy_grid::inflate_map(map_, MAP_MARGIN);
 }
 
+void LMPC::init_SS_from_data(string data_file) {
+    CSVReader reader(data_file);
+    // Get the data from CSV File
+    std::vector<std::vector<std::string>> dataList = reader.getData();
+    SS_.clear();
+    // Print the content of row by row on screen
+    int time_prev=0;
+    int it =0;
+    vector<Sample> traj;
+    for(std::vector<std::string> vec : dataList){
+        Sample sample;
+        sample.time = std::stof(vec.at(0));
+        // check if it's a new lap
+        if (sample.time - time_prev < 0) {
+            it++;
+            update_cost_to_go(traj);
+            SS_.push_back(traj);
+            traj.clear();
+        }
+        sample.x(0) = std::stof(vec.at(1));
+        sample.x(1) = std::stof(vec.at(2));
+        sample.x(2) = std::stof(vec.at(3));
+        sample.u(0) = std::stof(vec.at(4));
+        sample.u(1) = std::stof(vec.at(5));
+        sample.iter = it;
+        traj.push_back(sample);
+        time_prev = sample.time;
+    }
+    SS_.push_back(traj);
+}
+
 void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     /******** process pose info *************/
+    visualize_centerline();
     speed_m_ = odom_msg->twist.twist.linear.x;
 
-    tf::Quaternion q_tf;
-    tf::quaternionMsgToTF(odom_msg->pose.pose.orientation, q_tf);
-    tf::Matrix3x3 rot(q_tf);
-    double roll, pitch;
-    rot.getRPY(roll, pitch, yaw_);
-    car_pos_ = tf::Vector3(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, 0.0);
-    tf_.setOrigin(car_pos_);
-    tf_.setRotation(q_tf);
+    float x = odom_msg->pose.pose.position.x;
+    float y = odom_msg->pose.pose.position.y;
+    s_curr_ = track_->findTheta(x, y,0,true);
+    car_pos_ = tf::Vector3(x, y, 0.0);
+    yaw_ = tf::getYaw(odom_msg->pose.pose.orientation);
 
-    double s_curr_ = track_.findTheta(car_pos_.x(), car_pos_.y(), 0, true);
     if (first_run_){
-        s_prev_ = s_curr_;
         // initialize QPSolution_ from initial Sample Safe Set (using the 2nd iteration)
         reset_QPSolution(1);
         first_run_ = false;
@@ -173,9 +270,9 @@ void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
   /******** LMPC MAIN LOOP starts ********/
 
     /***check if it is new lap***/
-    if (s_curr_ - s_prev_ < -track_.length/2){
+    if (s_curr_ - s_prev_ < -track_->length/2){
         iter_++;
-        update_cost_to_go();
+        update_cost_to_go(curr_trajectory_);
         sort(curr_trajectory_.begin(), curr_trajectory_.end(), compare_s);
         SS_.push_back(curr_trajectory_);
         curr_trajectory_.clear();
@@ -193,6 +290,58 @@ void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     terminal_state_pred_ = QPSolution_.segment<nx>(N*nx);
     s_prev_ = s_curr_;
     time_++;
+}
+
+void LMPC::visualize_centerline(){
+    // plot waypoints
+//    visualization_msgs::Marker dots;
+//    dots.header.stamp = ros::Time::now();
+//    dots.header.frame_id = "map";
+//    dots.id = rviz_id::CENTERLINE;
+//    dots.ns = "centerline";
+//    dots.type = visualization_msgs::Marker::POINTS;
+//    dots.scale.x = dots.scale.y = 0.08;
+//    dots.scale.z = 0.04;
+//    dots.action = visualization_msgs::Marker::ADD;
+//    dots.pose.orientation.w = 1.0;
+//    dots.color.r = 1.0;
+//    dots.color.a = 1.0;
+//    //dots.lifetime = ros::Duration();
+//
+//    vector<Point_ref> centerline_waypoints = track_->centerline_points;
+//
+//    for (int i=0; i<centerline_waypoints.size(); i++){
+//        geometry_msgs::Point p;
+//        p.x = centerline_waypoints.at(i).x;
+//        p.y = centerline_waypoints.at(i).y;
+//        dots.points.push_back(p);
+//    }
+
+    visualization_msgs::Marker spline_dots;
+    spline_dots.header.stamp = ros::Time::now();
+    spline_dots.header.frame_id = "map";
+    spline_dots.id = rviz_id::CENTERLINE_SPLINE;
+    spline_dots.ns = "centerline";
+    spline_dots.type = visualization_msgs::Marker::LINE_STRIP;
+    spline_dots.scale.x = spline_dots.scale.y = 0.02;
+    spline_dots.scale.z = 0.02;
+    spline_dots.action = visualization_msgs::Marker::ADD;
+    spline_dots.pose.orientation.w = 1.0;
+    spline_dots.color.b = 1.0;
+    spline_dots.color.a = 1.0;
+    // spline_dots.lifetime = ros::Duration();
+
+    for (float t=0.0; t<track_->length; t+=0.05){
+        geometry_msgs::Point p;
+        p.x = track_->x_eval(t);
+        p.y = track_->y_eval(t);
+        spline_dots.points.push_back(p);
+    }
+
+    visualization_msgs::MarkerArray markers;
+  //  markers.markers.push_back(dots);
+    markers.markers.push_back(spline_dots);
+    track_viz_pub_.publish(markers);
 }
 
 int LMPC::reset_QPSolution(int iter){
@@ -214,7 +363,7 @@ Matrix<double,nx,1> LMPC::select_terminal_candidate(){
 
 void LMPC::add_point(){
     Sample point;
-    point.x = VectorXd(car_pos_.x(), car_pos_.y(), yaw_);
+    point.x = Vector3d(car_pos_.x(), car_pos_.y(), yaw_);
     point.s = s_curr_;
     point.iter = iter_;
     point.time = time_;
@@ -284,19 +433,19 @@ int LMPC::find_nearest_point(vector<Sample>& trajectory, double s){
 
 }
 
-void LMPC::update_cost_to_go(){
-    curr_trajectory_[curr_trajectory_.size()-1].cost = 0;
-    for (int i=curr_trajectory_.size()-2; i>=0; i--){
-        curr_trajectory_[i].cost = curr_trajectory_[i+1].cost + 1;
+void LMPC::update_cost_to_go(vector<Sample>& trajectory){
+    trajectory[trajectory.size()-1].cost = 0;
+    for (int i=trajectory.size()-2; i>=0; i--){
+        trajectory[i].cost = trajectory[i+1].cost + 1;
     }
 }
 
 Vector3d LMPC::global_to_track(double x, double y, double yaw, double s){
-    double x_proj = track_.x_eval(s);
-    double y_proj = track_.y_eval(s);
+    double x_proj = track_->x_eval(s);
+    double y_proj = track_->y_eval(s);
     double e_y = sqrt((x-x_proj)*(x-x_proj) + (y-y_proj)*(y-y_proj));
-    double dx_ds = track_.x_eval_d(s);
-    double dy_ds = track_.y_eval_d(s);
+    double dx_ds = track_->x_eval_d(s);
+    double dy_ds = track_->y_eval_d(s);
     e_y = dx_ds*(y-y_proj) - dy_ds*(x-x_proj) >0 ? e_y : -e_y;
     double e_yaw = yaw - atan2(dy_ds, dx_ds);
     while(e_yaw > M_PI) e_yaw -= 2*M_PI;
@@ -306,9 +455,9 @@ Vector3d LMPC::global_to_track(double x, double y, double yaw, double s){
 }
 
 Vector3d LMPC::track_to_global(double e_y, double e_yaw, double s){
-    double dx_ds = track_.x_eval_d(s);
-    double dy_ds = track_.y_eval_d(s);
-    Vector2d proj(track_.x_eval(s), track_.y_eval(s));
+    double dx_ds = track_->x_eval_d(s);
+    double dy_ds = track_->y_eval_d(s);
+    Vector2d proj(track_->x_eval(s), track_->y_eval(s));
     Vector2d pos = proj + Vector2d(-dy_ds, dx_ds).normalized()*e_y;
     double yaw = e_yaw + atan2(dy_ds, dx_ds);
     return Vector3d(pos(0), pos(1), yaw);
@@ -356,7 +505,7 @@ void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, n
 
 void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
     vector<Sample> terminal_CSS;
-    double s_t = track_.findTheta(terminal_candidate(0), terminal_candidate(1), 0, true);
+    double s_t = track_->findTheta(terminal_candidate(0), terminal_candidate(1), 0, true);
     select_convex_safe_set(terminal_CSS, iter_-2, iter_-1, s_t);
 
     /** MPC variables: z = [x0, ..., xN, u0, ..., uN-1, s0, ..., sN, lambda0, ....., lambda(2*K_NEAR)]*
@@ -385,7 +534,7 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
 
         x_k_ref = QPSolution_.segment<nx>(i*nx);
         u_k_ref = QPSolution_.segment<nu>((N+1)*nx + i*nu);
-        double s_ref = track_.findTheta(x_k_ref(0), x_k_ref(1), 0, true);
+        double s_ref = track_->findTheta(x_k_ref(0), x_k_ref(1), 0, true);
         get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref);
         /* form Hessian entries*/
         // cost does not depend on x0, only 1 to N
@@ -417,8 +566,8 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
             constraintMatrix.insert(i*nx+row, i*nx+row) = -1.0;
         }
 
-        double dx_dtheta = track_.x_eval_d(s_ref);
-        double dy_dtheta = track_.y_eval_d(s_ref);
+        double dx_dtheta = track_->x_eval_d(s_ref);
+        double dy_dtheta = track_->y_eval_d(s_ref);
 
         constraintMatrix.insert((N+1)*nx+ 2*i, i*nx) = -dy_dtheta;      // a*x
         constraintMatrix.insert((N+1)*nx+ 2*i, i*nx+1) = dx_dtheta;     // b*y
@@ -433,27 +582,27 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
         Vector2d right_line_p1, right_line_p2, left_line_p1, left_line_p2;
         geometry_msgs::Point r_p1, r_p2, l_p1, l_p2;
 
-        center_p << track_.x_eval(s_ref), track_.y_eval(s_ref);
-        right_tangent_p = center_p + track_.getRightHalfWidth(s_ref) * Vector2d(dy_dtheta, -dx_dtheta).normalized();
-        left_tangent_p  = center_p + track_.getLeftHalfWidth(s_ref) * Vector2d(-dy_dtheta, dx_dtheta).normalized();
+        center_p << track_->x_eval(s_ref), track_->y_eval(s_ref);
+        right_tangent_p = center_p + track_->getRightHalfWidth(s_ref) * Vector2d(dy_dtheta, -dx_dtheta).normalized();
+        left_tangent_p  = center_p + track_->getLeftHalfWidth(s_ref) * Vector2d(-dy_dtheta, dx_dtheta).normalized();
 
         right_line_p1 = right_tangent_p + 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
         right_line_p2 = right_tangent_p - 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
         left_line_p1 = left_tangent_p + 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
         left_line_p2 = left_tangent_p - 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
 
+        // For visualizing track boundaries
         r_p1.x = right_line_p1(0);  r_p1.y = right_line_p1(1);
         r_p2.x = right_line_p2(0);  r_p2.y = right_line_p2(1);
         l_p1.x = left_line_p1(0);   l_p1.y = left_line_p1(1);
         l_p2.x = left_line_p2(0);   l_p2.y = left_line_p2(1);
-
         border_lines_.push_back(r_p1);  border_lines_.push_back(r_p2);
         border_lines_.push_back(l_p1); border_lines_.push_back(l_p2);
 
         double C1 =  - dy_dtheta*right_tangent_p(0) + dx_dtheta*right_tangent_p(1);
         double C2 = - dy_dtheta*left_tangent_p(0) + dx_dtheta*left_tangent_p(1);
 
-        lower((N+1)*nx+ 2*i) = min(C1, C2);
+        lower((N+1)*nx+ 2*i) =  min(C1, C2);
         upper((N+1)*nx+ 2*i) = OsqpEigen::INFTY;
 
         lower((N+1)*nx+ 2*i+1) = -OsqpEigen::INFTY;
@@ -507,10 +656,10 @@ void LMPC::solve_MPC(Matrix<double,nx,1>& terminal_candidate){
 
     // sum of lamda's = 1;
     for (int i=0; i<2*K_NEAR; i++){
-        constraintMatrix.insert(numOfConstraintsSoFar +1, (N+1)*nx+ N*nu + (N+1)*nx + i) = 1;
+        constraintMatrix.insert(numOfConstraintsSoFar, (N+1)*nx+ N*nu + (N+1)*nx + i) = 1;
     }
-    lower(numOfConstraintsSoFar + 1) = 1.0;
-    upper(numOfConstraintsSoFar + 1) = 1.0;
+    lower(numOfConstraintsSoFar) = 1.0;
+    upper(numOfConstraintsSoFar) = 1.0;
     numOfConstraintsSoFar++;
     if (numOfConstraintsSoFar != (N+1)*nx+ 2*(N+1)*nx + N*nu + (N-1) + (N+1)*nx + (2*K_NEAR) +4) throw;  // for debug
 
@@ -568,4 +717,56 @@ void LMPC::applyControl() {
     ack_msg.drive.steering_angle = steer;
     ack_msg.drive.steering_angle_velocity = 1.0;
     drive_pub_.publish(ack_msg);
+}
+
+void LMPC::visualize_mpc_solution() {
+    visualization_msgs::MarkerArray markers;
+
+    visualization_msgs::Marker pred_dots;
+    pred_dots.header.stamp = ros::Time::now();
+    pred_dots.header.frame_id = "map";
+    pred_dots.id = rviz_id::PREDICTION;
+    pred_dots.ns = "predicted_positions";
+    pred_dots.type = visualization_msgs::Marker::POINTS;
+    pred_dots.scale.x = pred_dots.scale.y = pred_dots.scale.z = 0.08;
+    pred_dots.action = visualization_msgs::Marker::ADD;
+    pred_dots.pose.orientation.w = 1.0;
+    pred_dots.color.g = 1.0;
+    pred_dots.color.a = 1.0;
+    for (int i=0; i<N+1; i++){
+        geometry_msgs::Point p;
+        p.x = QPSolution_(i*nx);
+        p.y = QPSolution_(i*nx+1);
+        pred_dots.points.push_back(p);
+    }
+    markers.markers.push_back(pred_dots);
+
+    visualization_msgs::Marker borderlines;
+    borderlines.header.stamp = ros::Time::now();
+    borderlines.header.frame_id = "map";
+    borderlines.id = rviz_id::BORDERLINES;
+    borderlines.ns = "borderlines";
+    borderlines.type = visualization_msgs::Marker::LINE_LIST;
+    borderlines.scale.x = 0.03;
+    borderlines.action = visualization_msgs::Marker::ADD;
+    borderlines.pose.orientation.w = 1.0;
+    borderlines.color.r = 1.0;
+    borderlines.color.a = 1.0;
+
+    borderlines.points = border_lines_;
+    markers.markers.push_back(borderlines);
+
+    LMPC_viz_pub_.publish(markers);
+}
+
+int main(int argc, char **argv){
+    ros::init(argc, argv, "LMPC");
+    ros::NodeHandle nh;
+    LMPC LMPC(nh);
+    ros::Rate rate(20);
+    while(ros::ok()){
+        ros::spinOnce();
+        rate.sleep();
+    }
+    return 0;
 }

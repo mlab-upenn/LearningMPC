@@ -127,8 +127,11 @@ include_directories(
 
 add_executable(LMPC src/LMPC.cpp)
 target_link_libraries(LMPC ${catkin_LIBRARIES})
-
 add_dependencies(LMPC ${catkin_EXPORTED_TARGETS})
+
+add_executable(record_init_ss src/record_initial_safe_set.cpp)
+target_link_libraries(record_init_ss ${catkin_LIBRARIES})
+add_dependencies(record_init_ss ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(LMPC OsqpEigen::OsqpEigen osqp::osqp)
 
@@ -185,16 +188,16 @@ target_link_libraries(LMPC OsqpEigen::OsqpEigen osqp::osqp)
 ## Mark libraries for installation
 ## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_libraries.html
 # install(TARGETS ${PROJECT_NAME}
-#   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-# )
+# ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+# LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+# RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
+#)
 
 ## Mark cpp header files for installation
 # install(DIRECTORY include/${PROJECT_NAME}/
-#   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-#   FILES_MATCHING PATTERN "*.h"
-#   PATTERN ".svn" EXCLUDE
+   #DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+  # FILES_MATCHING PATTERN "*.h"
+ #  PATTERN ".svn" EXCLUDE
 # )
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)

@@ -1,13 +1,6 @@
 //
-// Created by Yuwei Wang on 11/9/19.
-//
-//
 // Author: Yuwei Wang
 
-#ifndef SRC_OCCUPANCY_GRID_H
-#define SRC_OCCUPANCY_GRID_H
-
-#endif //SRC_OCCUPANCY_GRID_H
 
 #include <nav_msgs/OccupancyGrid.h>
 #include <visualization_msgs/Marker.h>
