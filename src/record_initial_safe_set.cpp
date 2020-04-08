@@ -8,6 +8,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <std_msgs/Float32.h>
 
 using namespace std;
 
@@ -25,12 +26,13 @@ private:
     ofstream data_file_;
     double ros_time_prev_;
     nav_msgs::Odometry odom_;
+    double acc_cmd_;
 
 
     Track* track_;
     void cmd_callback(const ackermann_msgs::AckermannDriveStampedConstPtr &cmd_msg);
     void odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg);
-
+    void accel_cmd_callback(const std_msgs::Float32ConstPtr & accel_cmd);
 };
 
 Record_SS::Record_SS(ros::NodeHandle &nh) : nh_(nh) {
@@ -48,7 +50,7 @@ Record_SS::Record_SS(ros::NodeHandle &nh) : nh_(nh) {
     else{
         ROS_INFO("Map received");
         nav_msgs::OccupancyGrid map = *map_ptr;
-        track_ = new Track(wp_file, space, map, true);
+        track_ = new Track(wp_file, map, true);
     }
 
     nav_msgs::Odometry odom_msg;
@@ -67,8 +69,13 @@ Record_SS::Record_SS(ros::NodeHandle &nh) : nh_(nh) {
 
     data_file_.open( "initial_safe_set.csv");
 }
+
 void Record_SS::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     odom_ = *odom_msg;
+}
+
+void Record_SS::accel_cmd_callback(const std_msgs::Float32ConstPtr & accel_cmd){
+    acc_cmd_ = accel_cmd->data;
 }
 
 void Record_SS::cmd_callback(const ackermann_msgs::AckermannDriveStampedConstPtr &cmd_msg) {
@@ -82,12 +89,12 @@ void Record_SS::cmd_callback(const ackermann_msgs::AckermannDriveStampedConstPtr
         float x = odom_.pose.pose.position.x;
         float y = odom_.pose.pose.position.y;
         double s_curr = track_->findTheta(x,y,0,true);
+        double vel = odom_.twist.twist.linear.x;
 
         // check if is a new lap;
         if (s_curr - s_prev_ < -track_->length/2){
 //            cout<<"s_curr: "<<s_curr<<endl;
 //            cout<<"s_prev: "<<s_prev_<<endl;
-
             time_ = 0;
             lap_++;
             if (lap_>1){ //initial two laps completed
@@ -96,7 +103,7 @@ void Record_SS::cmd_callback(const ackermann_msgs::AckermannDriveStampedConstPtr
                 ros::shutdown();
             }
         }
-        data_file_ << time_ <<","<<x<< ","<<y<<","<<yaw<<","<<speed_cmd<<","<<steer_cmd<<","<<s_curr<<endl;
+        data_file_ << time_ <<","<<x<< ","<<y<<","<<yaw<<","<<vel<<","<<acc_cmd_<<","<<steer_cmd<<","<<s_curr<<endl;
         time_++;
 
         s_prev_ = s_curr;

@@ -51,7 +51,8 @@ public:
     nav_msgs::OccupancyGrid map;
     vector<double> width_info;
 
-    Track(string file_name, float space, nav_msgs::OccupancyGrid& map, bool sparse=false) : space(space), map(map){
+    Track(string file_name, nav_msgs::OccupancyGrid& map, bool sparse=false) : space(0.05), map(map){
+        space = 0.05;
         centerline_points.clear();
         vector<geometry_msgs::Point> waypoints;
         CSVReader reader(file_name);
@@ -175,66 +176,75 @@ public:
         /* return: projected theta along centerline_points, theta is between [0, length]
          * */
            //  wrapTheta(theta_guess);
-            int start, end;
-            if(global_search){
-                start = 0;
-                end = centerline_points.size();
-            }
-            else{
-                int mid = int(floor(theta_guess/space));
-                start = mid - SEARCH_RANGE;
-                end = mid + SEARCH_RANGE;
-            }
-            int min_ind, second_min_ind;
+//            int start, end;
+//            if(global_search){
+//                start = 0;
+//                end = centerline_points.size();
+//            }
+//            else{
+//                int mid = int(floor(theta_guess/space));
+//                start = mid - SEARCH_RANGE;
+//                end = mid + SEARCH_RANGE;
+//            }
+//            int min_ind, second_min_ind;
+//            double min_dist2 = 10000000.0;
+//            for (int i=start; i<end; i++){
+//                if (i>centerline_points.size()-1){ i=0;}
+//                if (i<0){ i=centerline_points.size()-1;}
+//                double dist2 = pow(x-centerline_points.at(i).x, 2) + pow(y-centerline_points.at(i).y, 2);
+//                if( dist2 < min_dist2){
+//                    min_dist2 = dist2;
+//                    min_ind = i;
+//                }
+//            }
+//            if (sqrt(min_dist2)>HALF_WIDTH_MAX && !global_search){
+//                return findTheta(x, y, theta_guess, true);
+//            }
+//            Eigen::Vector2d p, p0, p1;
+//            int min_ind_prev = min_ind-1;
+//            int min_ind_next = min_ind+1;
+//            if (min_ind_next>centerline_points.size()-1){ min_ind_next -= centerline_points.size();}
+//            if (min_ind_prev<0){ min_ind_prev += centerline_points.size();}
+//
+//            //closest line segment: either [min_ind ,min_ind+1] or [min_ind,min_ind-1]
+//            if (pow(x-centerline_points.at(min_ind_next).x, 2) + pow(y-centerline_points.at(min_ind_next).y, 2) <
+//                    pow(x-centerline_points.at(min_ind_prev).x, 2) + pow(y-centerline_points.at(min_ind_prev).y, 2)){
+//                    second_min_ind = min_ind_next;
+//            }
+//            else{
+//                second_min_ind = min_ind_prev;
+//            }
+//
+//            p(0) = x;  p(1) = y;
+//            p0(0) = centerline_points.at(min_ind).x;  p0(1) = centerline_points.at(min_ind).y;
+//            p1(0) = centerline_points.at(second_min_ind).x;  p1(1) = centerline_points.at(second_min_ind).y;
+//
+//            double projection = abs((p - p0).dot(p1 - p0)/(p1 - p0).norm());
+//            double theta;
+//
+//            if (min_ind > second_min_ind){
+//                theta = centerline_points.at(min_ind).theta - projection;
+//            }
+//            else {
+//                if (min_ind == 0 && second_min_ind == centerline_points.size()-1) {
+//                    theta = length - projection;
+//                } else {
+//                    theta = centerline_points.at(min_ind).theta + projection;
+//                }
+//            }
+//            if (theta>length){ theta -= length;}
+//            if (theta<0){ theta += length;}
+
+            int min_ind;
             double min_dist2 = 10000000.0;
-            for (int i=start; i<end; i++){
-                if (i>centerline_points.size()-1){ i=0;}
-                if (i<0){ i=centerline_points.size()-1;}
+            for (int i=0; i<centerline_points.size(); i++){
                 double dist2 = pow(x-centerline_points.at(i).x, 2) + pow(y-centerline_points.at(i).y, 2);
                 if( dist2 < min_dist2){
                     min_dist2 = dist2;
                     min_ind = i;
                 }
             }
-            if (sqrt(min_dist2)>HALF_WIDTH_MAX && !global_search){
-                return findTheta(x, y, theta_guess, true);
-            }
-            Eigen::Vector2d p, p0, p1;
-            int min_ind_prev = min_ind-1;
-            int min_ind_next = min_ind+1;
-            if (min_ind_next>centerline_points.size()-1){ min_ind_next -= centerline_points.size();}
-            if (min_ind_prev<0){ min_ind_prev += centerline_points.size();}
-
-            //closest line segment: either [min_ind ,min_ind+1] or [min_ind,min_ind-1]
-            if (pow(x-centerline_points.at(min_ind_next).x, 2) + pow(y-centerline_points.at(min_ind_next).y, 2) <
-                    pow(x-centerline_points.at(min_ind_prev).x, 2) + pow(y-centerline_points.at(min_ind_prev).y, 2)){
-                    second_min_ind = min_ind_next;
-            }
-            else{
-                second_min_ind = min_ind_prev;
-            }
-
-            p(0) = x;  p(1) = y;
-            p0(0) = centerline_points.at(min_ind).x;  p0(1) = centerline_points.at(min_ind).y;
-            p1(0) = centerline_points.at(second_min_ind).x;  p1(1) = centerline_points.at(second_min_ind).y;
-
-            double projection = abs((p - p0).dot(p1 - p0)/(p1 - p0).norm());
-            double theta;
-
-            if (min_ind > second_min_ind){
-                theta = centerline_points.at(min_ind).theta - projection;
-            }
-            else {
-                if (min_ind == 0 && second_min_ind == centerline_points.size()-1) {
-                    theta = length - projection;
-                } else {
-                    theta = centerline_points.at(min_ind).theta + projection;
-                }
-            }
-//            if (theta>length){ theta -= length;}
-//            if (theta<0){ theta += length;}
-
-            return theta;
+            return min_ind*space;
     }
 
     void wrapTheta(double& theta){
