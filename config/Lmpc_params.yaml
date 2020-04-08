@@ -2,14 +2,14 @@ pose_topic : "odom"
 drive_topic: "nav"
 wp_file_name: "/home/yuwei/yuwei_ws/src/LearningMPC/centerline_waypoints.csv"
 
-r_accel : 3.0
-r_steer: 10.0
+r_accel : 2.0
+r_steer: 12.0
 q_s : 600.0
 
 N: 20
 Ts: 0.05
 K_NEAR: 14
-SPEED_MAX: 6.00
+SPEED_MAX: 7.00
 STEER_MAX: 0.41
 ACCELERATION_MAX: 1.5
 DECELERATION_MAX: 5.0
