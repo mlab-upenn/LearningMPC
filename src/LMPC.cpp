@@ -182,7 +182,7 @@ LMPC::LMPC(ros::NodeHandle &nh): nh_(nh){
 
     iter_ = 2;
 
-    init_SS_from_data("/home/yuwei/yuwei_ws/src/LearningMPC/initial_safe_set.csv");
+    init_SS_from_data("/home/yuwei/yuwei_ws/src/LearningMPC/data/initial_safe_set.csv");
     //cout<<"SS size: "<<SS_.size()<<endl;
 }
 
