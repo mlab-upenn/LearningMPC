@@ -329,6 +329,7 @@ void LMPC::run(){
     time_++;
     first_run_ = false;
 }
+
 void LMPC::visualize_centerline(){
     visualization_msgs::Marker spline_dots;
     spline_dots.header.stamp = ros::Time::now();
