@@ -1,5 +1,6 @@
 # LearningMPC
-Learning based Model Prodictive Control for online iterative trajectory optimization for the F1/10 car 
+Learning based Model Prodictive Control for online iterative trajectory optimization for F1/10 autonomous racing. The implementation is inspired and based on "Learning How to Autonomously Race a Car:
+a Predictive Control Approach, Ugo Rosolia and Francesco Borrelli" 
 
 The car is learning to improve its racing performance iteratively over laps.
 
