@@ -175,7 +175,7 @@ public:
     double findTheta(double x, double y, double theta_guess, bool global_search= false){
         /* return: projected theta along centerline_points, theta is between [0, length]
          * */
-           //  wrapTheta(theta_guess);
+          //  wrapTheta(theta_guess);
 //            int start, end;
 //            if(global_search){
 //                start = 0;
@@ -234,7 +234,6 @@ public:
 //            }
 //            if (theta>length){ theta -= length;}
 //            if (theta<0){ theta += length;}
-
             int min_ind;
             double min_dist2 = 10000000.0;
             for (int i=0; i<centerline_points.size(); i++){
@@ -321,5 +320,4 @@ public:
     double getcenterline_pointsRadius(double theta){
         return 1.0/(getcenterline_pointsCurvature(theta));
     }
-
 };

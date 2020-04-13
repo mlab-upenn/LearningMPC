@@ -12,15 +12,11 @@
 
 #include <math.h>
 #include <vector>
-#include <array>
 #include <iostream>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <random>
-#include <LearningMPC/spline.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
@@ -30,10 +26,10 @@
 #include <Eigen/Sparse>
 #include "OsqpEigen/OsqpEigen.h"
 #include <unsupported/Eigen/MatrixFunctions>
+#include <LearningMPC/car_params.h>
 
-const int nx = 4;
+const int nx = 6;
 const int nu = 2;
-const double CAR_LENGTH = 0.35;
 
 using namespace std;
 using namespace Eigen;
@@ -65,7 +61,6 @@ public:
 private:
     ros::NodeHandle nh_;
     ros::Publisher track_viz_pub_;
-    ros::Publisher trajectories_viz_pub_;
     ros::Publisher LMPC_viz_pub_;
     ros::Publisher drive_pub_;
     ros::Publisher debugger_pub_;
@@ -75,14 +70,13 @@ private:
     ros::Subscriber map_sub_;
 
     /*Paramaters*/
+    CarParams car;
     string pose_topic;
     string drive_topic;
     string wp_file_name;
     double WAYPOINT_SPACE;
     double Ts;
-    double ds;
-    int speed_num;
-    int steer_num;
+
     int N;
     int K_NEAR;
     double SPEED_MAX;
@@ -90,7 +84,7 @@ private:
     double ACCELERATION_MAX;
     double DECELERATION_MAX;
     double MAP_MARGIN;
-    double SPEED_THRESHOLD;
+    double VEL_THRESHOLD;
     // MPC params
     double q_s;
     double r_accel;
@@ -102,9 +96,14 @@ private:
     tf::Transform tf_;
     tf::Vector3 car_pos_;
     double yaw_;
+    double vel_;
+    double yawdot_;
+    double slip_angle_;
     double s_prev_;
     double s_curr_;
-    double speed_m_;
+
+    // use dynamic model or not
+    bool use_dyn_;
 
     //Sample Safe set
     vector<vector<Sample>> SS_;
@@ -135,7 +134,7 @@ private:
     void solve_MPC(const Matrix<double,nx,1>& terminal_candidate);
 
     void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd,
-            Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op);
+            Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op, bool use_dyn);
 
     Vector3d global_to_track(double x, double y, double yaw, double s);
     Vector3d track_to_global(double e_y, double e_yaw, double s);
@@ -178,12 +177,13 @@ LMPC::LMPC(ros::NodeHandle &nh): nh_(nh){
     s_prev_ = track_->findTheta(x, y,0,true);
     car_pos_ = tf::Vector3(x, y, 0.0);
     yaw_ = tf::getYaw(odom_msg.pose.pose.orientation);
-    speed_m_ = odom_msg.twist.twist.linear.x;
+    vel_ = odom_msg.twist.twist.linear.x;
+    yawdot_ = 0;
+    slip_angle_ = 0;
 
     iter_ = 2;
-
+    use_dyn_ = false;
     init_SS_from_data("/home/yuwei/yuwei_ws/src/LearningMPC/data/initial_safe_set.csv");
-    //cout<<"SS size: "<<SS_.size()<<endl;
 }
 
 void LMPC::getParameters(ros::NodeHandle &nh) {
@@ -197,6 +197,8 @@ void LMPC::getParameters(ros::NodeHandle &nh) {
     nh.getParam("DECELERATION_MAX", DECELERATION_MAX);
     nh.getParam("SPEED_MAX", SPEED_MAX);
     nh.getParam("STEER_MAX", STEER_MAX);
+    nh.getParam("VEL_THRESHOLD", VEL_THRESHOLD);
+
     nh.getParam("WAYPOINT_SPACE", WAYPOINT_SPACE);
     nh.getParam("r_accel",r_accel);
     nh.getParam("r_steer",r_steer);
@@ -204,6 +206,16 @@ void LMPC::getParameters(ros::NodeHandle &nh) {
     R.setZero();
     R.diagonal() << r_accel, r_steer;
     nh.getParam("MAP_MARGIN",MAP_MARGIN);
+
+    nh.getParam("wheelbase", car.wheelbase);
+    nh.getParam("friction_coeff", car.friction_coeff);
+    nh.getParam("height_cg", car.h_cg);
+    nh.getParam("l_cg2rear", car.l_r);
+    nh.getParam("l_cg2front", car.l_f);
+    nh.getParam("C_S_front", car.cs_f);
+    nh.getParam("C_S_rear", car.cs_r);
+    nh.getParam("moment_inertia", car.I_z);
+    nh.getParam("mass", car.mass);
 }
 
 int compare_s(Sample& s1, Sample& s2){
@@ -246,6 +258,8 @@ void LMPC::init_SS_from_data(string data_file) {
         sample.x(1) = std::stof(vec.at(2));
         sample.x(2) = std::stof(vec.at(3));
         sample.x(3) = std::stof(vec.at(4));
+        sample.x(4) = 0;
+        sample.x(5) = 0;
         sample.u(0) = std::stof(vec.at(5));
         sample.u(1) = std::stof(vec.at(6));
         sample.s = std::stof(vec.at(7));
@@ -258,17 +272,28 @@ void LMPC::init_SS_from_data(string data_file) {
 }
 
 void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
-    /******** process pose info *************/
-
-    visualize_centerline();
-    speed_m_ = odom_msg->twist.twist.linear.x;
-
+    //visualize_centerline();
+    /** process pose info **/
     float x = odom_msg->pose.pose.position.x;
     float y = odom_msg->pose.pose.position.y;
     s_curr_ = track_->findTheta(x, y,0,true);
     car_pos_ = tf::Vector3(x, y, 0.0);
     yaw_ = tf::getYaw(odom_msg->pose.pose.orientation);
+    vel_ = sqrt(pow(odom_msg->twist.twist.linear.x,2) + pow(odom_msg->twist.twist.linear.y,2));
+    yawdot_ = odom_msg->twist.twist.angular.z;
+    slip_angle_ = atan2(odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.x);
 
+    /** STATE MACHINE: check if dynamic model should be used based on current speed **/
+    if ((!use_dyn_) && (vel_ > VEL_THRESHOLD) && (iter_>3)){
+        use_dyn_ = true;
+    }
+    if(use_dyn_ && (vel_< VEL_THRESHOLD*0.7)){
+        use_dyn_ = false;
+    }
+    if (vel_ > 4.5) {
+        R(0,0) = 1.3 * r_accel;
+        R(1,1) = 1.8 * r_steer;
+    }
 }
 
 void LMPC::run(){
@@ -283,7 +308,7 @@ void LMPC::run(){
     if (s_curr_ - s_prev_ < -track_->length/2){
         iter_++;
         update_cost_to_go(curr_trajectory_);
-        sort(curr_trajectory_.begin(), curr_trajectory_.end(), compare_s);
+        //sort(curr_trajectory_.begin(), curr_trajectory_.end(), compare_s);
         SS_.push_back(curr_trajectory_);
         curr_trajectory_.clear();
      //   reset_QPSolution(iter_-1);
@@ -305,30 +330,6 @@ void LMPC::run(){
     first_run_ = false;
 }
 void LMPC::visualize_centerline(){
-    // plot waypoints
-//    visualization_msgs::Marker dots;
-//    dots.header.stamp = ros::Time::now();
-//    dots.header.frame_id = "map";
-//    dots.id = rviz_id::CENTERLINE;
-//    dots.ns = "centerline";
-//    dots.type = visualization_msgs::Marker::POINTS;
-//    dots.scale.x = dots.scale.y = 0.08;
-//    dots.scale.z = 0.04;
-//    dots.action = visualization_msgs::Marker::ADD;
-//    dots.pose.orientation.w = 1.0;
-//    dots.color.r = 1.0;
-//    dots.color.a = 1.0;
-//    //dots.lifetime = ros::Duration();
-//
-//    vector<Point_ref> centerline_waypoints = track_->centerline_points;
-//
-//    for (int i=0; i<centerline_waypoints.size(); i++){
-//        geometry_msgs::Point p;
-//        p.x = centerline_waypoints.at(i).x;
-//        p.y = centerline_waypoints.at(i).y;
-//        dots.points.push_back(p);
-//    }
-
     visualization_msgs::Marker spline_dots;
     spline_dots.header.stamp = ros::Time::now();
     spline_dots.header.frame_id = "map";
@@ -351,7 +352,6 @@ void LMPC::visualize_centerline(){
     }
 
     visualization_msgs::MarkerArray markers;
-   // markers.markers.push_back(dots);
     markers.markers.push_back(spline_dots);
     track_viz_pub_.publish(markers);
 }
@@ -375,7 +375,8 @@ Matrix<double,nx,1> LMPC::select_terminal_candidate(){
 
 void LMPC::add_point(){
     Sample point;
-    point.x = Vector4d(car_pos_.x(), car_pos_.y(), yaw_, speed_m_);
+    point.x << car_pos_.x(), car_pos_.y(), yaw_, vel_, yawdot_, slip_angle_;
+
     point.s = s_curr_;
     point.iter = iter_;
     point.time = time_;
@@ -387,7 +388,6 @@ void LMPC::select_convex_safe_set(vector<Sample>& convex_safe_set, int iter_star
     for (int it = iter_start; it<= iter_end; it++){
         int nearest_ind = find_nearest_point(SS_[it], s);
         int start_ind, end_ind;
-        bool overlap_with_finishing_line = false;
         int lap_cost = SS_[it][0].cost;
 
         if (K_NEAR%2 != 0 ) {
@@ -442,8 +442,6 @@ int LMPC::find_nearest_point(vector<Sample>& trajectory, double s){
         else low = mid+1;
     }
     return abs(trajectory[low].s-s) < (abs(trajectory[high].s-s))? low : high;
-
-
 }
 
 void LMPC::update_cost_to_go(vector<Sample>& trajectory){
@@ -477,32 +475,113 @@ Vector3d LMPC::track_to_global(double e_y, double e_yaw, double s){
 }
 
 void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd,
-        Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op){
+        Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op, bool use_dyn){
 
     double yaw = x_op(2);
     double v = x_op(3);
     double accel = u_op(0);
     double steer = u_op(1);
+    double yaw_dot = x_op(4);
+    double slip_angle = x_op(5);
 
-    Vector4d dynamics, h;
-    dynamics(0) = v*cos(yaw);
-    dynamics(1) = v*sin(yaw);
-    dynamics(2) = tan(steer)*v/CAR_LENGTH;
-    dynamics(3) = accel;
+    VectorXd dynamics(6), h(6);
+    Matrix<double, nx, nx> A, M12;
+    Matrix<double, nx, nu> B;
 
-    Matrix<double,nx,nx> A, M12;
-    Matrix<double,nx,nu> B;
+    if (!use_dyn) {
+        // Kinematic Model
+        dynamics(0) = v * cos(yaw);
+        dynamics(1) = v * sin(yaw);
+        dynamics(2) = v * tan(steer)/car.wheelbase;
+        dynamics(3) = accel;
+        dynamics(4) = 0;
+        dynamics(5) = 0;
 
-    A <<   0.0, 0.0, -v*sin(yaw), cos(yaw),
-            0.0, 0.0,  v*cos(yaw), sin(yaw),
-            0.0, 0.0,      0.0,    tan(steer)/CAR_LENGTH,
-            0.0, 0.0,      0.0,    0.0;
+        A <<    0.0, 0.0, -v*sin(yaw),  cos(yaw),       0.0,  0.0,
+                0.0, 0.0,  v*cos(yaw),  sin(yaw),       0.0,  0.0,
+                0.0, 0.0,         0.0,   tan(steer)/car.wheelbase,     0.0,  0.0,
+                0.0, 0.0,         0.0,       0.0,       0.0,  0.0,
+                0.0, 0.0,         0.0,       0.0,       0.0,  0.0,
+                0.0, 0.0,         0.0,       0.0,       0.0,  0.0;
 
-    B <<   0.0, 0.0,
-            0.0, 0.0,
-            0.0, v/(cos(steer)*cos(steer)*CAR_LENGTH),
-            1.0, 0.0;
+        B <<    0.0, 0.0,
+                0.0, 0.0,
+                0.0, v / (cos(steer) * cos(steer) * car.wheelbase),
+                1.0, 0.0,
+                0.0, 0.0,
+                0.0, 0.0;
+    }
+    else{
+        // Single Track Dynamic Model
 
+        double g = 9.81;
+        double rear_val = g * car.l_r - accel * car.h_cg;
+        double front_val = g * car.l_f + accel * car.h_cg;
+
+        dynamics(0) = v * cos(yaw+slip_angle);
+        dynamics(1) = v * sin(yaw+slip_angle);
+        dynamics(2) = yaw_dot;
+        dynamics(3) = accel;
+        dynamics(4) = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase)) *
+                      (car.l_f * car.cs_f * steer * (rear_val) +
+                       slip_angle * (car.l_r * car.cs_r * (front_val) - car.l_f * car.cs_f * (rear_val)) -
+                       (yaw_dot/v) * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val)));        // yaw_dot dynamics
+        dynamics(5) = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
+                      (car.cs_f * steer * rear_val - slip_angle * (car.cs_r * front_val + car.cs_f * rear_val) +
+                              (yaw_dot/v) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val)) - yaw_dot;        // slip_angle dynamics
+
+        double dfyawdot_dv, dfyawdot_dyawdot, dfyawdot_dslip, dfslip_dv, dfslip_dyawdot, dfslip_dslip;
+        double dfyawdot_da, dfyawdot_dsteer, dfslip_da, dfslip_dsteer;
+
+        dfyawdot_dv = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val))
+                * yaw_dot / pow(v, 2);
+
+        dfyawdot_dyawdot = -(car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                           * (pow(car.l_f, 2) * car.cs_f * (rear_val) + pow(car.l_r, 2) * car.cs_r * (front_val))/v;
+
+        dfyawdot_dslip = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                            * (car.l_r * car.cs_r * (front_val) - car.l_f * car.cs_f * (rear_val));
+
+        dfslip_dv = -(car.friction_coeff / (car.l_r + car.l_f)) *
+                    (car.cs_f * steer * rear_val - slip_angle * (car.cs_r * front_val + car.cs_f * rear_val))/pow(v,2)
+                -2*(car.friction_coeff / (car.l_r + car.l_f)) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val) * yaw_dot/pow(v,3);
+
+        dfslip_dyawdot = (car.friction_coeff / (pow(v,2) * (car.l_r + car.l_f))) * (car.cs_r * car.l_r * front_val - car.cs_f * car.l_f * rear_val) - 1;
+
+        dfslip_dslip = -(car.friction_coeff / (v * (car.l_r + car.l_f)))*(car.cs_r * front_val + car.cs_f * rear_val);
+
+        dfyawdot_da = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase))
+                *(-car.l_f*car.cs_f*car.h_cg*steer + car.l_r*car.cs_r*car.h_cg*slip_angle + car.l_f*car.cs_f*car.h_cg*slip_angle
+                  - (yaw_dot/v)*(-pow(car.l_f,2)*car.cs_f*car.h_cg) + pow(car.l_r,2)*car.cs_r*car.h_cg);
+
+        dfyawdot_dsteer = (car.friction_coeff * car.mass / (car.I_z * car.wheelbase)) *
+                      (car.l_f * car.cs_f * rear_val);
+
+        dfslip_da = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
+                (-car.cs_f*car.h_cg*steer - (car.cs_r*car.h_cg - car.cs_f*car.h_cg)*slip_angle +
+                (car.cs_r*car.h_cg*car.l_r + car.cs_f*car.h_cg*car.l_f)*(yaw_dot/v));
+
+        dfslip_dsteer = (car.friction_coeff / (v * (car.l_r + car.l_f))) *
+                (car.cs_f * rear_val);
+
+
+        A <<    0.0, 0.0, -v*sin(yaw+slip_angle), cos(yaw+slip_angle),                 0.0,  -v*sin(yaw+slip_angle),
+                0.0, 0.0,  v*cos(yaw+slip_angle), sin(yaw+slip_angle),                 0.0,   v*cos(yaw+slip_angle),
+                0.0, 0.0,                       0.0,                   0.0,                 1.0,                       0.0,
+                0.0, 0.0,                       0.0,                   0.0,                 0.0,                       0.0,
+                0.0, 0.0,                       0.0,           dfyawdot_dv,     dfyawdot_dyawdot,  dfyawdot_dslip,
+                0.0, 0.0,                       0.0,             dfslip_dv,       dfslip_dyawdot,    dfslip_dslip;
+
+        B <<    0.0, 0.0,
+                0.0, 0.0,
+                0.0, 0.0,
+                1.0, 0.0,
+                dfyawdot_da, dfyawdot_dsteer,
+                dfslip_da,     dfslip_dsteer;
+    }
+
+    /**  Discretize using Zero-Order Hold **/
     Matrix<double,nx+nx,nx+nx> aux, M;
     aux.setZero();
     aux.block<nx,nx>(0,0) << A;
@@ -511,11 +590,7 @@ void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, n
     M12 = M.block<nx,nx>(0,nx);
     h = dynamics - (A*x_op + B*u_op);
 
-    //Discretize with Euler approximation
-    //Ad = Matrix3d::Identity() + A*Ts;
     Ad = (A*Ts).exp();
-   // Bd = Ts*B;
-    //hd = Ts*h;
     Bd = M12*B;
     hd = M12*h;
 
@@ -551,8 +626,8 @@ void LMPC::solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
     Matrix<double,nx,1> x0, hd;
     border_lines_.clear();
 
-    x0 <<car_pos_.x(), car_pos_.y(), yaw_, speed_m_;
-
+    if (use_dyn_)  x0 <<car_pos_.x(), car_pos_.y(), yaw_, vel_, yawdot_, slip_angle_;
+    else{ x0 <<car_pos_.x(), car_pos_.y(), yaw_, vel_, 0.0, 0.0; }
     /** make sure there are no discontinuities in yaw**/
     // first check terminal safe_set
     for (int i=0; i<terminal_CSS.size(); i++){
@@ -568,11 +643,11 @@ void LMPC::solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
         x_k_ref = QPSolution_.segment<nx>(i*nx);
         u_k_ref = QPSolution_.segment<nu>((N+1)*nx + i*nu);
         double s_ref = track_->findTheta(x_k_ref(0), x_k_ref(1), 0, true);
-        get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref);
+        get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref, use_dyn_);
         /* form Hessian entries*/
         // cost does not depend on x0, only 1 to N
         if (i>0) {
-            HessianMatrix.insert((N + 1) * nx + N * nu + i, (N + 1) * nx + N * nu + i) = q_s;
+            HessianMatrix.insert((N+1)*nx + N*nu + i, (N+1)*nx + N*nu + i) = q_s;
         }
         if (i<N){
             for (int row=0; row<nu; row++){
@@ -768,6 +843,8 @@ void LMPC::solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
 //    cout<<QPSolution_<<endl;
     solver.clearSolver();
 
+    if (use_dyn_) ROS_INFO("using dynamics");
+    else ROS_INFO("using kinematics");
 }
 
 void LMPC::applyControl() {
@@ -775,6 +852,8 @@ void LMPC::applyControl() {
     float steer = QPSolution_((N+1)*nx+1);
     cout<<"accel_cmd: "<<accel<<endl;
     cout<<"steer_cmd: "<<steer<<endl;
+    cout << "slip_angle: "<<slip_angle_<<endl;
+
 
     steer = min(steer, 0.41f);
     steer = max(steer, -0.41f);
