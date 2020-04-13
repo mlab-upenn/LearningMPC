@@ -15,11 +15,11 @@ Lap 25 (Top speed 3 m/s)
 
 ![](media/lap25.gif)
 
-After Lap 60, it converges to an optimal policy (Top speed 6 m/s) with lots of high speed drifting.
+After Lap 60, it converges to an optimal policy (Top speed 6 m/s) with precisely controlled high speed drifting.
 
 ![](media/lap60_converged_drifting.gif).
 
-With low frictions, it converges to a policy with lower speed but with more precisely controlled drifting.
+With low frictions, it converges to a policy with lower top speed but with more drifting.
 
 ![](media/drifting_low_friction.gif).
 
