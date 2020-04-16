@@ -28,4 +28,4 @@ C_S_front: 2.3 #.79 # 1/rad ? (estimated weight/4)
 C_S_rear: 2.3 #.79 # 1/rad ? (estimated weight/4)
 mass: 3.17 # kg (measured on car 'lidart')
 moment_inertia: .0398378 # kg m^2 (estimated as a rectangle with width and height of car and evenly distributed mass, then shifted to account for center of mass location)
-
+random: 1.0

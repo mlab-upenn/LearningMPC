@@ -128,8 +128,6 @@ private:
     int reset_QPSolution(int iter);
     void odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg);
     void add_point();
-    void select_trajectory();
-    void simulate_dynamics(Matrix<double,nx,1>& state, Matrix<double,nu,1>& input, double dt, Matrix<double,nx,1>& new_state);
 
     void solve_MPC(const Matrix<double,nx,1>& terminal_candidate);
 
@@ -146,7 +144,6 @@ private:
     void select_convex_safe_set(vector<Sample>& convex_safe_set, int iter_start, int iter_end, double s);
     int find_nearest_point(vector<Sample>& trajectory, double s);
     void update_cost_to_go(vector<Sample>& trajectory);
-    Matrix<double,nx,1> get_nonlinear_dynamics(Matrix<double,nx,1>& x, Matrix<double,nu,1>& u,  double t);
 };
 
 LMPC::LMPC(ros::NodeHandle &nh): nh_(nh){
@@ -571,8 +568,8 @@ void LMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, n
                 0.0, 0.0,  v*cos(yaw+slip_angle), sin(yaw+slip_angle),                 0.0,   v*cos(yaw+slip_angle),
                 0.0, 0.0,                       0.0,                   0.0,                 1.0,                       0.0,
                 0.0, 0.0,                       0.0,                   0.0,                 0.0,                       0.0,
-                0.0, 0.0,                       0.0,           dfyawdot_dv,     dfyawdot_dyawdot,  dfyawdot_dslip,
-                0.0, 0.0,                       0.0,             dfslip_dv,       dfslip_dyawdot,    dfslip_dslip;
+                0.0, 0.0,                       0.0,           dfyawdot_dv,     dfyawdot_dyawdot,           dfyawdot_dslip,
+                0.0, 0.0,                       0.0,             dfslip_dv,       dfslip_dyawdot,             dfslip_dslip;
 
         B <<    0.0, 0.0,
                 0.0, 0.0,
