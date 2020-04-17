@@ -30,7 +30,7 @@
 
 const int nx = 6;
 const int nu = 2;
-
+const int RRT_INTERVAL = 0.1;
 using namespace std;
 using namespace Eigen;
 
@@ -87,6 +87,7 @@ private:
     double VEL_THRESHOLD;
     // MPC params
     double q_s;
+    double q_s_terminal;
     double r_accel;
     double r_steer;
     Matrix<double, nu, nu> R;
@@ -115,6 +116,8 @@ private:
     // map info
     nav_msgs::OccupancyGrid map_;
     nav_msgs::OccupancyGrid map_updated_;
+    vector<geometry_msgs::Point> rrt_path_;
+
 
     VectorXd QPSolution_;
     bool first_run_;
@@ -124,6 +127,8 @@ private:
     void getParameters(ros::NodeHandle& nh);
     void init_occupancy_grid();
     void init_SS_from_data(const string data_file);
+    void map_callback(const nav_msgs::OccupancyGrid::Ptr &map_msg);
+    void rrt_path_callback(const visualization_msgs::Marker::ConstPtr &path_msg);
     void visualize_centerline();
     int reset_QPSolution(int iter);
     void odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg);
@@ -154,8 +159,8 @@ LMPC::LMPC(ros::NodeHandle &nh): nh_(nh){
 
     odom_sub_ = nh_.subscribe(pose_topic, 10, &LMPC::odom_callback, this);
     drive_pub_ = nh_.advertise<ackermann_msgs::AckermannDriveStamped>(drive_topic, 1);
-   // rrt_sub_ = nh_.subscribe("path_found", 1, &LMPC::rrt_path_callback, this);
-  //  map_sub_ = nh_.subscribe("map_updated", 1, &LMPC::map_callback, this);
+    rrt_sub_ = nh_.subscribe("path_found", 1, &LMPC::rrt_path_callback, this);
+    map_sub_ = nh_.subscribe("map_updated", 1, &LMPC::map_callback, this);
 
     track_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("track_centerline", 1);
 
@@ -200,6 +205,7 @@ void LMPC::getParameters(ros::NodeHandle &nh) {
     nh.getParam("r_accel",r_accel);
     nh.getParam("r_steer",r_steer);
     nh.getParam("q_s",q_s);
+    nh.getParam("q_s_terminal", q_s_terminal);
     R.setZero();
     R.diagonal() << r_accel, r_steer;
     nh.getParam("MAP_MARGIN",MAP_MARGIN);
@@ -268,6 +274,88 @@ void LMPC::init_SS_from_data(string data_file) {
     SS_.push_back(traj);
 }
 
+void LMPC::map_callback(const nav_msgs::OccupancyGrid::Ptr &map_msg){
+    visualization_msgs::Marker dots;
+    dots.header.frame_id = "map";
+    dots.id = rviz_id::DEBUG;
+    dots.ns = "debug_points";
+    dots.type = visualization_msgs::Marker::POINTS;
+    dots.scale.x = dots.scale.y = 0.1;
+    dots.scale.z = 0.1;
+    dots.action = visualization_msgs::Marker::ADD;
+    dots.pose.orientation.w = 1.0;
+    dots.color.b = 1.0;
+    dots.color.g = 0.5;
+    dots.color.a = 1.0;
+
+    vector<geometry_msgs::Point> path_processed;
+
+    if(rrt_path_.empty()) return;
+    for (int i=0; i< rrt_path_.size()-1; i++){
+        path_processed.push_back(rrt_path_[i]);
+        double dist = sqrt(pow(rrt_path_[i+1].x-rrt_path_[i].x, 2)
+                           +pow(rrt_path_[i+1].y-rrt_path_[i].y, 2));
+        if (dist < RRT_INTERVAL) continue;
+        int num = static_cast<int>(ceil(dist/RRT_INTERVAL));
+        for(int j=1; j< num; j++){
+            geometry_msgs::Point p;
+            p.x = rrt_path_[i].x + j*((rrt_path_[i+1].x - rrt_path_[i].x)/num);
+            p.y = rrt_path_[i].y + j*((rrt_path_[i+1].y - rrt_path_[i].y)/num);
+            path_processed.push_back(p);
+        }
+    }
+
+    for (int i=0; i<path_processed.size(); i++){
+        double theta = track_->findTheta(path_processed[i].x, path_processed[i].y, 0, true);
+        Vector2d p_path(path_processed[i].x,path_processed[i].y);
+        Vector2d p_proj(track_->x_eval(theta), track_->y_eval(theta));
+        Vector2d p1, p2;
+        int t=0;
+        // search one direction until hit obstacle
+        while(true){
+            double x = (p_path + t*map_msg->info.resolution*(p_path-p_proj).normalized())(0);
+            double y = (p_path + t*map_msg->info.resolution*(p_path-p_proj).normalized())(1);
+            if(occupancy_grid::is_xy_occupied(*map_msg, x, y)){
+                p1(0) = x; p1(1) = y;
+                geometry_msgs::Point point;
+                point.x = x; point.y = y;
+                dots.points.push_back(point);
+                break;
+            }
+            t++;
+        }
+        t=0;
+        //search the other direction until hit obstacle
+        while(true){
+            double x = (p_path - t*map_msg->info.resolution*(p_path-p_proj).normalized())(0);
+            double y = (p_path - t*map_msg->info.resolution*(p_path-p_proj).normalized())(1);
+            if(occupancy_grid::is_xy_occupied(*map_msg, x, y)){
+                p2(0) = x; p2(1) = y;
+                geometry_msgs::Point point;
+                point.x = x; point.y = y;
+                dots.points.push_back(point);
+                break;
+            }
+            t++;
+        }
+        double dx_dtheta = track_->x_eval_d(theta);
+        double dy_dtheta = track_->y_eval_d(theta);
+        double right_width = Vector2d(dy_dtheta, -dx_dtheta).dot(p1-p_proj)>0 ? (p1-p_proj).norm() : -(p1-p_proj).norm();
+        double left_width = Vector2d(-dy_dtheta, dx_dtheta).dot(p2-p_proj)>0 ? (p2-p_proj).norm() : -(p2-p_proj).norm();
+//        right_width = -0.15;
+//        left_width =  0.4;
+        cout<<"p1: "<< p1<<endl;
+        cout<<"p2: "<< p2<<endl;
+
+        track_->setHalfWidth(theta, left_width, right_width);
+    }
+    debugger_pub_.publish(dots);
+}
+
+void LMPC:: rrt_path_callback(const visualization_msgs::Marker::ConstPtr &path_msg){
+    rrt_path_ = path_msg->points;
+}
+
 void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     //visualize_centerline();
     /** process pose info **/
@@ -281,10 +369,10 @@ void LMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     slip_angle_ = atan2(odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.x);
 
     /** STATE MACHINE: check if dynamic model should be used based on current speed **/
-    if ((!use_dyn_) && (vel_ > VEL_THRESHOLD) && (iter_>3)){
+    if ((!use_dyn_) && (vel_ > VEL_THRESHOLD)){
         use_dyn_ = true;
     }
-    if(use_dyn_ && (vel_< VEL_THRESHOLD*0.7)){
+    if(use_dyn_ && (vel_< VEL_THRESHOLD*0.5)){
         use_dyn_ = false;
     }
     if (vel_ > 4.5) {
@@ -604,7 +692,7 @@ void LMPC::solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
     double s_t = track_->findTheta(terminal_candidate(0), terminal_candidate(1), 0, true);
     select_convex_safe_set(terminal_CSS, iter_-2, iter_-1, s_t);
 
-    /** MPC variables: z = [x0, ..., xN, u0, ..., uN-1, s0, ..., sN, lambda0, ....., lambda(2*K_NEAR), s_t1, s_t2, s_t3, s_t4]*
+    /** MPC variables: z = [x0, ..., xN, u0, ..., uN-1, s0, ..., sN, lambda0, ....., lambda(2*K_NEAR), s_t1, s_t2, .. s_t6]*
      *  constraints: dynamics, track bounds, input limits, acceleration limit, slack, lambdas, terminal state, sum of lambda's*/
     SparseMatrix<double> HessianMatrix((N+1)*nx+ N*nu + (N+1) + (2*K_NEAR) +nx, (N+1)*nx+ N*nu + (N+1)+ (2*K_NEAR) +nx);
     SparseMatrix<double> constraintMatrix((N+1)*nx+ 2*(N+1) + N*nu + (N+1) + (N+1) + (2*K_NEAR) + 2*nx+1, (N+1)*nx+ N*nu + (N+1)+ (2*K_NEAR) +nx);
@@ -801,7 +889,7 @@ void LMPC::solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
 
     //
     for (int i=0; i<nx; i++){
-        HessianMatrix.insert((N+1)*nx+ N*nu + (N+1) + 2*K_NEAR + i, (N+1)*nx+ N*nu + (N+1) + 2*K_NEAR + i) = q_s;
+        HessianMatrix.insert((N+1)*nx+ N*nu + (N+1) + 2*K_NEAR + i, (N+1)*nx+ N*nu + (N+1) + 2*K_NEAR + i) = q_s_terminal;
     }
 //    for (int i=0; i<2*K_NEAR; i++){
 //        gradient((N+1)*nx+ N*nu + (N+1) + i) = terminal_CSS[i].cost;
