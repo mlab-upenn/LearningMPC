@@ -24,4 +24,13 @@ With low frictions, it converges to a policy with lower top speed but with more 
 
 ![](media/drifting_low_friction.gif).
 
+Obstacle Avoidance 1:
+![](media/obstacle_avoid.gif).
+
+Obstacle Avoidance 2 (low friction): 
+![](media/obstacle_low_friction.gif).
+
+
+
+
 
