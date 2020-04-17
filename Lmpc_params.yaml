@@ -3,17 +3,18 @@ drive_topic: "nav"
 wp_file_name: "/home/yuwei/yuwei_ws/src/LearningMPC/data/centerline_waypoints.csv"
 
 r_accel : 1.5
-r_steer: 12.0
-q_s : 2000.0
+r_steer: 18.0
+q_s: 3000.0
+q_s_terminal: 800
 
-N: 20
+N: 25
 Ts: 0.05
-K_NEAR: 14
+K_NEAR: 16
 SPEED_MAX: 10.00
 STEER_MAX: 0.41
 ACCELERATION_MAX: 4.0
 DECELERATION_MAX: 5.0
-VEL_THRESHOLD: 1.3
+VEL_THRESHOLD: 0.8
 
 MAP_MARGIN: 0.32
 
@@ -28,4 +29,4 @@ C_S_front: 2.3 #.79 # 1/rad ? (estimated weight/4)
 C_S_rear: 2.3 #.79 # 1/rad ? (estimated weight/4)
 mass: 3.17 # kg (measured on car 'lidart')
 moment_inertia: .0398378 # kg m^2 (estimated as a rectangle with width and height of car and evenly distributed mass, then shifted to account for center of mass location)
-
+random: 1.0

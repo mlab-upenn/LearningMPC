@@ -283,7 +283,6 @@ public:
 
     double getPhi(double theta){
         wrapTheta(theta);
-
         double dx_dtheta = X_spline.eval_d(theta);
         double dy_dtheta = Y_spline.eval_d(theta);
 
