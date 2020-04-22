@@ -7,6 +7,10 @@ Initial Sample Safe Set is collected using a path following controller. Starting
 
 ![The F1/10 hardware used for experiments](https://storage.googleapis.com/groundai-web-prod/media/users/user_211599/project_333357/images/introduction/images/Fig_1.png)
 
+<p align="center">
+  <img src="https://storage.googleapis.com/groundai-web-prod/media/users/user_211599/project_333357/images/introduction/images/Fig_1.png" width="350" title="The F1/10 hardware used for experiments">
+</p>
+
 Lap 5 (Top speed 1.2 m/s)
 
 ![](media/lap5.gif)
