@@ -46,7 +46,7 @@ Lap time vs number of iterations completed:
 
 Converged optimal policy recorded:
 
-![](media/final_traj.PNG)
+![](media/final traj.PNG)
 
 
 Currently working on Gaussian Process and local linear regression for system identification to update the dynamic model online.
