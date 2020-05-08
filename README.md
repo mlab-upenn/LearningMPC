@@ -13,8 +13,9 @@ Initial Sample Safe Set is collected using a path following controller. Starting
 
 The improvement of racing performance over laps is shown here below.
 
+![](media/laps_compare.png)
 
-
+\\
 
 Lap 5 (Top speed 1.2 m/s)
 
