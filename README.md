@@ -13,7 +13,7 @@ Initial Sample Safe Set is collected using a path following controller. Starting
 
 The improvement of racing performance over laps is shown here below. The black one is the initial lap with path following controller. The colored ones are the improved trajectories given by LMPC
 
-![](media/laps_compare.PNG)
+![image](media/laps_compare.PNG)
 
 
 Lap 5 (Top speed 1.2 m/s)
@@ -42,11 +42,11 @@ Obstacle Avoidance 2 (low friction):
 
 Lap time vs number of iterations completed:
 
-![](media/lap_time_decrease.PNG)
+![image](media/lap_time_decrease.PNG)
 
 Converged optimal policy recorded:
 
-![](media/final_traj.PNG)
+![image](media/final_traj.PNG)
 
 
 Currently working on Gaussian Process and local linear regression for system identification to update the dynamic model online.
