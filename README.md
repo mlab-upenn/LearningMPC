@@ -13,7 +13,35 @@ Initial Sample Safe Set is collected using a path following controller. Starting
 
 The improvement of racing performance over laps is shown here below. The black one is the initial lap with path following controller. The colored ones are the improved trajectories given by LMPC
 
-![image](media/laps_compare.PNG)
+### Dependencies
+1. Install the f1/10 racecar simulator:
+  https://github.com/mlab-upenn/f110-fall2019-skeletons/tree/master/racecar_simulator
+ 
+2. Install QSQP Solver: 
+   https://osqp.org/docs/get_started/sources.html
+   
+3. Install the C++ Eigen wrapper for OSQP:
+   https://robotology.github.io/osqp-eigen/doxygen/doc/html/index.html
+   
+### How to Run
+Build everything with ```catkin_make```  from the root directory of your catkin workspace
+
+First launch the simulator by entering the command below in terminal:
+
+    roslaunch racecar_simulator simulator.launch
+    
+Position the car as shown below (The car must be placed ahead of the starting line) using interactive markers in Rviz 
+
+Then launch LearningMPC node:
+
+    roslaunch LearningMPC lmpc.launch
+
+Enter ```n``` in the simulator terminal to unlock the car
+
+
+### Results
+![](media/laps_compare.PNG)
+
 
 
 Lap 5 (Top speed 1.2 m/s)
@@ -42,16 +70,17 @@ Obstacle Avoidance 2 (low friction):
 
 Lap time vs number of iterations completed:
 
-![image](media/lap_time_decrease.PNG)
+![](media/lap_time_decrease.PNG)
 
 Converged optimal policy recorded:
 
-![image](media/final_traj.PNG)
+![](media/final_traj.PNG)
 
 
 Currently working on Gaussian Process and local linear regression for system identification to update the dynamic model online.
 
 The project is inspired by "Learning How to Autonomously Race a Car: a Predictive Control Approach, Ugo Rosolia and Francesco Borrelli"
+
 
 
 

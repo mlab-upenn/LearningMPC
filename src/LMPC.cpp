@@ -73,7 +73,8 @@ private:
     CarParams car;
     string pose_topic;
     string drive_topic;
-    string wp_file_name;
+    string waypoint_file;
+    string init_data_file;
     double WAYPOINT_SPACE;
     double Ts;
 
@@ -155,7 +156,7 @@ LMPC::LMPC(ros::NodeHandle &nh): nh_(nh){
 
     getParameters(nh_);
     init_occupancy_grid();
-    track_ = new Track(wp_file_name, map_, true);
+    track_ = new Track(waypoint_file, map_, true);
 
     odom_sub_ = nh_.subscribe(pose_topic, 10, &LMPC::odom_callback, this);
     drive_pub_ = nh_.advertise<ackermann_msgs::AckermannDriveStamped>(drive_topic, 1);
@@ -185,13 +186,15 @@ LMPC::LMPC(ros::NodeHandle &nh): nh_(nh){
 
     iter_ = 2;
     use_dyn_ = false;
-    init_SS_from_data("/home/yuwei/yuwei_ws/src/LearningMPC/data/initial_safe_set.csv");
+    init_SS_from_data(init_data_file);
 }
 
 void LMPC::getParameters(ros::NodeHandle &nh) {
     nh.getParam("pose_topic", pose_topic);
     nh.getParam("drive_topic", drive_topic);
-    nh.getParam("wp_file_name", wp_file_name);
+    nh.getParam("waypoint_file", waypoint_file);
+    nh.getParam("init_data_file", init_data_file);
+
     nh.getParam("N",N);
     nh.getParam("Ts",Ts);
     nh.getParam("K_NEAR", K_NEAR);
@@ -825,7 +828,6 @@ void LMPC::solve_MPC(const Matrix<double,nx,1>& terminal_candidate){
         constraintMatrix.insert((N+1)*nx + 2*(N+1) + N*nu + (N+1) + i, (N+1)*nx+N*nu +i) = 1.0;
         lower((N+1)*nx + 2*(N+1) + N*nu  + (N+1) + i) = 0;
         upper((N+1)*nx + 2*(N+1) + N*nu  + (N+1) + i) = OsqpEigen::INFTY;
-
     }
     int numOfConstraintsSoFar = (N+1)*nx + 2*(N+1) + N*nu + (N+1) + (N+1);
 

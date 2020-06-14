@@ -41,7 +41,7 @@ Record_SS::Record_SS(ros::NodeHandle &nh) : nh_(nh) {
 
     string wp_file;
     double space;
-    nh.getParam("wp_file_name", wp_file);
+    nh.getParam("waypoint_file", wp_file);
     nh.getParam("WAYPOINT_SPACE", space);
 
     boost::shared_ptr<nav_msgs::OccupancyGrid const> map_ptr;
